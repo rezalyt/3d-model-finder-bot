@@ -7,7 +7,6 @@ const SEARCH_LIMIT = Number(process.env.SEARCH_LIMIT || 12);
 const TIMEOUT_MS = Number(process.env.HTTP_TIMEOUT_MS || 15000);
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const NASA_TREE_TTL_MS = 30 * 60 * 1000;
-const THREE_DDD_CONCURRENCY = 4;
 
 const FORMAT_ALIASES = {
   gltf: 'gltf', glb: 'glb', obj: 'obj', fbx: 'fbx', blend: 'blend', usd: 'usd', usdz: 'usdz',
@@ -22,7 +21,7 @@ const CAPABILITIES = [
   { name: 'polyhaven', mode: 'direct', formats: ['blend', 'fbx', 'gltf', 'obj', 'usd'], auth: 'none', formatFilter: 'metadata' },
   { name: 'nasa', mode: 'direct', formats: ['3ds', 'blend', 'fb', 'glb', 'max', 'maya', 'stl'], auth: 'none', formatFilter: 'path-extension' },
   { name: 'smithsonian', mode: 'direct', formats: ['stl', 'glb', 'gltf', 'obj', 'ply', 'blend', 'f3z'], auth: 'api-key-optional', formatFilter: 'native' },
-  { name: '3ddd', mode: 'direct', formats: ['max', 'fbx', 'obj', '3ds'], auth: 'none', formatFilter: 'page-metadata', access: 'link-only' },
+  { name: '3ddd', mode: 'direct-latest', formats: ['max', 'fbx', 'obj', '3ds'], auth: 'none', formatFilter: 'not-yet-available', access: 'link-only' },
   { name: '3dfetch-fallback', mode: 'fallback', formats: 'provider-dependent', auth: 'provider-dependent', formatFilter: 'normalized' },
 ];
 
@@ -44,7 +43,8 @@ let nasaTreeCache = null;
 let nasaTreeCacheTime = 0;
 let polyhavenCache = null;
 let polyhavenCacheTime = 0;
-let threeDDDCache = new Map();
+let threeDDDLatestCache = null;
+let threeDDDLatestCacheTime = 0;
 
 function normalizeFormat(value) {
   const key = String(value || '').trim().toLowerCase().replace(/^\./, '');
@@ -91,18 +91,6 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-async function fetchText(url, options = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
-    return await response.text();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function searchPrintables(query, format) {
   if (format && format !== 'stl') return [];
   const body = {
@@ -121,14 +109,12 @@ async function searchPrintables(query, format) {
   });
   if (data.errors?.length) throw new Error(data.errors.map(e => e.message).join('; '));
   const items = data?.data?.searchPrints2?.items || [];
-  return items
-    .filter(x => Array.isArray(x.stls) && x.stls.length > 0)
-    .map(x => normalize({
-      name: x.name,
-      sourceUrl: `https://www.printables.com/model/${x.id}-${x.slug}`,
-      formats: ['stl'],
-      license: x.license?.name || null,
-    }, 'printables'));
+  return items.filter(x => Array.isArray(x.stls) && x.stls.length > 0).map(x => normalize({
+    name: x.name,
+    sourceUrl: `https://www.printables.com/model/${x.id}-${x.slug}`,
+    formats: ['stl'],
+    license: x.license?.name || null,
+  }, 'printables'));
 }
 
 async function searchSketchfab(query, format) {
@@ -136,16 +122,13 @@ async function searchSketchfab(query, format) {
   const headers = {};
   if (process.env.SKETCHFAB_API_TOKEN) headers.Authorization = `Token ${process.env.SKETCHFAB_API_TOKEN}`;
   const data = await fetchJson(`https://api.sketchfab.com/v3/search?${params}`, { headers });
-  return (data.results || [])
-    .map(item => normalize({
-      name: item.name,
-      sourceUrl: item.viewerUrl,
-      thumbnailUrl: item.thumbnails?.images?.[0]?.url || null,
-      formats: Array.isArray(item.formats) ? item.formats : [],
-      license: item.license?.label || null,
-    }, 'sketchfab'))
-    .filter(Boolean)
-    .filter(item => !format || item.formats.includes(format));
+  return (data.results || []).map(item => normalize({
+    name: item.name,
+    sourceUrl: item.viewerUrl,
+    thumbnailUrl: item.thumbnails?.images?.[0]?.url || null,
+    formats: Array.isArray(item.formats) ? item.formats : [],
+    license: item.license?.label || null,
+  }, 'sketchfab')).filter(Boolean).filter(item => !format || item.formats.includes(format));
 }
 
 async function getPolyHavenAssets() {
@@ -162,21 +145,16 @@ async function searchPolyHaven(query, format) {
   if (format && !supported.includes(format)) return [];
   const assets = await getPolyHavenAssets();
   const q = query.toLowerCase();
-  return Object.entries(assets)
-    .filter(([id, item]) => {
-      const haystack = [id, item.name, item.description, ...(item.tags || []), item.category]
-        .filter(Boolean).join(' ').toLowerCase();
-      return q.split(/\s+/).every(term => haystack.includes(term));
-    })
-    .slice(0, SEARCH_LIMIT)
-    .map(([id, item]) => normalize({
-      name: item.name,
-      sourceUrl: `https://polyhaven.com/a/${id}`,
-      thumbnailUrl: item.thumbnail_url || null,
-      formats: supported,
-      license: 'CC0',
-    }, 'polyhaven'))
-    .filter(item => !format || item.formats.includes(format));
+  return Object.entries(assets).filter(([id, item]) => {
+    const haystack = [id, item.name, item.description, ...(item.tags || []), item.category].filter(Boolean).join(' ').toLowerCase();
+    return q.split(/\s+/).every(term => haystack.includes(term));
+  }).slice(0, SEARCH_LIMIT).map(([id, item]) => normalize({
+    name: item.name,
+    sourceUrl: `https://polyhaven.com/a/${id}`,
+    thumbnailUrl: item.thumbnail_url || null,
+    formats: supported,
+    license: 'CC0',
+  }, 'polyhaven')).filter(item => !format || item.formats.includes(format));
 }
 
 async function getNasaTree() {
@@ -234,85 +212,28 @@ async function searchSmithsonian(query, format) {
   }, 'smithsonian')).filter(item => !format || item.formats.includes(format));
 }
 
-function parse3dddFormats(html) {
-  const formats = new Set();
-  const lower = html.toLowerCase();
-  const patterns = [
-    [/(?:3ds\s*max|max\d{4}|\.max\b|\bmax\b)/i, 'max'],
-    [/\.fbx\b|\bfbx\b/i, 'fbx'],
-    [/\.obj\b|\bobj\b/i, 'obj'],
-    [/\.3ds\b|\b3ds\b/i, '3ds'],
-  ];
-  for (const [pattern, format] of patterns) {
-    if (pattern.test(lower)) formats.add(format);
-  }
-  return [...formats];
-}
-
-function extract3dddModelLinks(html) {
-  const results = [];
-  const seen = new Set();
-  const pattern = /<a[^>]+href=["'](\/3dmodels\/show\/[^"'#?]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let match;
-  while ((match = pattern.exec(html)) && results.length < SEARCH_LIMIT) {
-    const href = match[1];
-    if (seen.has(href)) continue;
-    seen.add(href);
-    const name = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    if (!name || /загрузить модель/i.test(name)) continue;
-    results.push({
-      name,
-      url: `https://3ddd.ru${href}`,
-    });
-  }
-  return results;
-}
-
-async function inspect3dddModel(model) {
-  const cached = threeDDDCache.get(model.url);
-  if (cached && Date.now() - cached.time < CACHE_TTL_MS) return cached.data;
-  try {
-    const html = await fetchText(model.url, {
-      headers: {
-        'User-Agent': '3DModelFinderBot/1.0 (+link-only; respects original site access)',
-        'Accept-Language': 'ru,en;q=0.8',
-      },
-    });
-    const formats = parse3dddFormats(html);
-    const access = /\bFREE\b/i.test(html) ? 'free' : (/\bPRO\b/i.test(html) ? 'pro' : 'unknown');
-    const data = normalize({
-      name: model.name,
-      sourceUrl: model.url,
-      formats,
-      license: access === 'free' ? 'FREE on 3DDD' : access === 'pro' ? 'PRO on 3DDD' : null,
-      access: 'link-only',
-    }, '3ddd');
-    threeDDDCache.set(model.url, { time: Date.now(), data });
-    return data;
-  } catch (error) {
-    console.error('3ddd model:', model.url, error.message);
-    return null;
-  }
-}
-
-async function search3DDD(query, format) {
-  const supported = ['max', 'fbx', 'obj', '3ds'];
-  if (format && !supported.includes(format)) return [];
-  const url = `https://3ddd.ru/3dmodels?query=${encodeURIComponent(query)}&order=relevance`;
-  const html = await fetchText(url, {
+async function get3DDDLatest() {
+  if (threeDDDLatestCache && Date.now() - threeDDDLatestCacheTime < CACHE_TTL_MS) return threeDDDLatestCache;
+  const data = await fetchJson('https://models.3ddd.ru/api/models/last', {
+    method: 'POST',
     headers: {
-      'User-Agent': '3DModelFinderBot/1.0 (+link-only; respects original site access)',
-      'Accept-Language': 'ru,en;q=0.8',
+      'content-type': 'application/json',
+      'accept': 'application/json',
+      'user-agent': '3DModelFinderBot/1.0 (+link-only)',
     },
+    body: '{}',
   });
-  const candidates = extract3dddModelLinks(html);
-  const output = [];
-  for (let i = 0; i < candidates.length; i += THREE_DDD_CONCURRENCY) {
-    const batch = candidates.slice(i, i + THREE_DDD_CONCURRENCY);
-    const inspected = await Promise.all(batch.map(inspect3dddModel));
-    output.push(...inspected.filter(Boolean));
-  }
-  return output.filter(item => !format || item.formats.includes(format));
+  if (!data?.success || !Array.isArray(data.data)) throw new Error('Unexpected 3DDD API response');
+  threeDDDLatestCache = data.data.map(item => normalize({
+    name: item.title || item.titleEn || item.slug,
+    sourceUrl: `https://3ddd.ru/3dmodels/show/${item.slug}`,
+    thumbnailUrl: item.image ? `https://3ddd.ru/${String(item.image).replace(/^\//, '')}` : null,
+    formats: [],
+    license: item.typeText === 'pro' ? 'PRO on 3DDD' : item.typeText === 'free' ? 'FREE on 3DDD' : null,
+    access: 'link-only',
+  }, '3ddd')));
+  threeDDDLatestCacheTime = Date.now();
+  return threeDDDLatestCache;
 }
 
 async function searchFallback(query, format) {
@@ -333,15 +254,10 @@ async function searchModels(query, format) {
     ['sketchfab', searchSketchfab],
     ['polyhaven', searchPolyHaven],
     ['nasa', searchNasa],
-    ['3ddd', search3DDD],
     ...(process.env.SMITHSONIAN_API_KEY ? [['smithsonian', searchSmithsonian]] : []),
   ];
   const settled = await Promise.allSettled(directTasks.map(([, fn]) => fn(query, format)));
-  const direct = settled.flatMap((result, index) => {
-    if (result.status === 'fulfilled') return result.value;
-    console.error(`${directTasks[index][0]}:`, result.reason?.message || result.reason);
-    return [];
-  });
+  const direct = settled.flatMap((result, index) => result.status === 'fulfilled' ? result.value : []);
   const fallback = await searchFallback(query, format);
   const seen = new Set();
   return [...direct, ...fallback].filter(item => {
@@ -357,14 +273,13 @@ app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     service: '3d-model-finder-search',
-    directProviders: CAPABILITIES.filter(x => x.mode === 'direct').map(x => x.name),
-    optionalDirectProviders: CAPABILITIES.filter(x => x.mode === 'direct' && x.auth !== 'none' && x.name !== 'sketchfab').map(x => x.name),
+    directProviders: CAPABILITIES.filter(x => x.mode.startsWith('direct')).map(x => x.name),
     fallback: '3dfetch',
     threeDFetchLoaded: Boolean(fetch3d),
   });
 });
 
-app.get('/providers', (_req, res) => {
+app.get('/providers', async (_req, res) => {
   res.json({
     providers: CAPABILITIES,
     configured: {
@@ -375,6 +290,15 @@ app.get('/providers', (_req, res) => {
       threeddd: true,
     },
   });
+});
+
+app.get('/latest/3ddd', async (_req, res) => {
+  try {
+    const results = await get3DDDLatest();
+    res.json({ source: '3ddd', count: results.length, results });
+  } catch (error) {
+    res.status(502).json({ error: '3ddd latest failed', details: String(error?.message || error) });
+  }
 });
 
 app.get('/search', async (req, res) => {
