@@ -5,7 +5,20 @@ const PORT = Number(process.env.PORT || 8787);
 
 let threeDFetch;
 try {
-  threeDFetch = await import("@pikal6/3dfetch");
+  const { Fetch3D } = await import("@pikal6/3dfetch");
+  if (typeof Fetch3D !== "function") {
+    throw new Error("Fetch3D export was not found in @pikal6/3dfetch");
+  }
+
+  const apiKeys = {};
+  if (process.env.SKETCHFAB_API_TOKEN) apiKeys.sketchfab = process.env.SKETCHFAB_API_TOKEN;
+  if (process.env.THINGIVERSE_API_TOKEN) apiKeys.thingiverse = process.env.THINGIVERSE_API_TOKEN;
+  if (process.env.MYMINIFACTORY_API_KEY) apiKeys.myminifactory = process.env.MYMINIFACTORY_API_KEY;
+
+  threeDFetch = new Fetch3D({
+    ...(Object.keys(apiKeys).length ? { apiKeys } : {}),
+    timeout: Number(process.env.THREEDFETСH_TIMEOUT_MS || 15000),
+  });
 } catch (err) {
   console.error("Failed to load @pikal6/3dfetch:", err);
 }
@@ -35,16 +48,11 @@ async function searchModels(query, format) {
     throw new Error("3dfetch is not installed or could not be loaded");
   }
 
-  const searchAll = threeDFetch.searchAll || threeDFetch.default?.searchAll;
-  if (typeof searchAll !== "function") {
-    throw new Error("searchAll() was not found in the installed 3dfetch package");
-  }
-
-  const options = { query };
+  const options = { query, limit: Number(process.env.SEARCH_LIMIT || 24) };
   if (format) options.formats = [format];
 
-  const response = await searchAll(options);
-  const rawResults = Array.isArray(response) ? response : (response?.results || []);
+  const response = await threeDFetch.searchAll(options);
+  const rawResults = Array.isArray(response) ? response : (response?.models || []);
   let results = rawResults.map(normalizeResult);
 
   // Final local guard: only return models that explicitly advertise the requested format.
@@ -76,7 +84,10 @@ app.get("/search", async (req, res) => {
     res.json({ query, format: format || null, count: results.length, results });
   } catch (err) {
     console.error("Search failed:", err);
-    res.status(502).json({ error: "3dfetch search failed", details: String(err.message || err) });
+    res.status(502).json({
+      error: "3dfetch search failed",
+      details: String(err?.message || err),
+    });
   }
 });
 
