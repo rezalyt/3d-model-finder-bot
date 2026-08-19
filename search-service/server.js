@@ -73,9 +73,7 @@ async function searchPrintables(query) {
   const items = data?.data?.searchPrints2?.items || [];
   return items.filter(x => Array.isArray(x.stls) && x.stls.length).map(x => normalize({
     name: x.name,
-    source: "printables",
     sourceUrl: `https://www.printables.com/model/${x.id}-${x.slug}`,
-    thumbnailUrl: x.stls[0]?.filePreviewPath ? `https://media.printables.com/media/prints/${x.id}/stls/${x.stls[0].filePreviewPath.split('/').pop()}` : null,
     license: x.license?.name || null,
     formats: ["stl"]
   }, "printables"));
@@ -92,7 +90,7 @@ async function search3dfetch(query, format = "") {
 
 async function searchModels(query, format) {
   const tasks = [];
-  if (format === "stl") tasks.push(searchPrintables().catch(err => { console.error("Printables:", err.message); return []; }));
+  if (format === "stl") tasks.push(searchPrintables(query).catch(err => { console.error("Printables:", err.message); return []; }));
   tasks.push(search3dfetch(query, format).catch(err => { console.error("3dfetch:", err.message); return []; }));
   const groups = await Promise.all(tasks);
   const seen = new Set();
