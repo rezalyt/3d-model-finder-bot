@@ -18,6 +18,8 @@ services:
         sync: false
       - key: TELEGRAM_WEBHOOK_SECRET
         generateValue: true
+      - key: TELEGRAM_WEBHOOK_PATH
+        value: /telegram/webhook
       - key: SEARCH_LIMIT
         value: "12"
       - key: PROVIDER_LIMIT
