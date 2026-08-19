@@ -5,20 +5,24 @@ const app = express();
 const port = Number(process.env.PORT || 8787);
 const SEARCH_LIMIT = Number(process.env.SEARCH_LIMIT || 12);
 const TIMEOUT_MS = Number(process.env.HTTP_TIMEOUT_MS || 15000);
+const CACHE_TTL_MS = 30 * 60 * 1000;
 const NASA_TREE_TTL_MS = 30 * 60 * 1000;
+const THREE_DDD_CONCURRENCY = 4;
 
 const FORMAT_ALIASES = {
   gltf: 'gltf', glb: 'glb', obj: 'obj', fbx: 'fbx', blend: 'blend', usd: 'usd', usdz: 'usdz',
   stl: 'stl', '3mf': '3mf', dae: 'dae', ply: 'ply', step: 'step', stp: 'step',
   iges: 'iges', igs: 'iges', off: 'off', max: 'max', c4d: 'c4d', ma: 'ma', mb: 'mb', abc: 'abc',
+  '3ds': '3ds', maya: 'maya', fb: 'fb',
 };
 
 const CAPABILITIES = [
-  { name: 'printables', mode: 'direct', formats: ['stl', '3mf'], auth: 'none', formatFilter: 'metadata' },
+  { name: 'printables', mode: 'direct', formats: ['stl'], auth: 'none', formatFilter: 'metadata' },
   { name: 'sketchfab', mode: 'direct', formats: ['glb', 'gltf', 'obj', 'fbx', 'blend', 'usd', 'usdz', 'stl', '3mf', 'dae', 'ply', 'abc', 'max', 'c4d'], auth: 'token-optional', formatFilter: 'metadata' },
   { name: 'polyhaven', mode: 'direct', formats: ['blend', 'fbx', 'gltf', 'obj', 'usd'], auth: 'none', formatFilter: 'metadata' },
-  { name: 'nasa', mode: 'direct', formats: ['3ds', 'blender', 'fb', 'glb', 'max', 'maya', 'stl'], auth: 'none', formatFilter: 'path-extension' },
+  { name: 'nasa', mode: 'direct', formats: ['3ds', 'blend', 'fb', 'glb', 'max', 'maya', 'stl'], auth: 'none', formatFilter: 'path-extension' },
   { name: 'smithsonian', mode: 'direct', formats: ['stl', 'glb', 'gltf', 'obj', 'ply', 'blend', 'f3z'], auth: 'api-key-optional', formatFilter: 'native' },
+  { name: '3ddd', mode: 'direct', formats: ['max', 'fbx', 'obj', '3ds'], auth: 'none', formatFilter: 'page-metadata', access: 'link-only' },
   { name: '3dfetch-fallback', mode: 'fallback', formats: 'provider-dependent', auth: 'provider-dependent', formatFilter: 'normalized' },
 ];
 
@@ -40,6 +44,7 @@ let nasaTreeCache = null;
 let nasaTreeCacheTime = 0;
 let polyhavenCache = null;
 let polyhavenCacheTime = 0;
+let threeDDDCache = new Map();
 
 function normalizeFormat(value) {
   const key = String(value || '').trim().toLowerCase().replace(/^\./, '');
@@ -70,14 +75,8 @@ function normalize(item, source) {
     thumbnail: item.thumbnail || item.thumbnailUrl || null,
     formats,
     license: item.license || null,
+    access: item.access || undefined,
   };
-}
-
-function matchesQuery(item, query) {
-  if (!query) return true;
-  const haystack = [item.name, item.description, ...(item.tags || []), ...(item.categories || [])]
-    .filter(Boolean).join(' ').toLowerCase();
-  return query.toLowerCase().split(/\s+/).every(term => haystack.includes(term));
 }
 
 async function fetchJson(url, options = {}) {
@@ -92,8 +91,20 @@ async function fetchJson(url, options = {}) {
   }
 }
 
+async function fetchText(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function searchPrintables(query, format) {
-  if (format && !['stl', '3mf'].includes(format)) return [];
+  if (format && format !== 'stl') return [];
   const body = {
     query: `query SearchPrints($query: String!, $limit: Int, $ordering: SearchChoicesEnum) {
       searchPrints2(query: $query, printType: print, limit: $limit, ordering: $ordering) {
@@ -138,7 +149,7 @@ async function searchSketchfab(query, format) {
 }
 
 async function getPolyHavenAssets() {
-  if (polyhavenCache && Date.now() - polyhavenCacheTime < NASA_TREE_TTL_MS) return polyhavenCache;
+  if (polyhavenCache && Date.now() - polyhavenCacheTime < CACHE_TTL_MS) return polyhavenCache;
   polyhavenCache = await fetchJson('https://api.polyhaven.com/assets?type=models', {
     headers: { 'User-Agent': '3DModelFinderBot/1.0' },
   });
@@ -192,8 +203,7 @@ async function searchNasa(query, format) {
     const ext = rel.includes('.') ? rel.split('.').pop().toLowerCase() : '';
     const normalizedExt = formatMap[ext] || ext;
     if (!['3ds', 'blend', 'fb', 'glb', 'max', 'maya', 'stl', 'fbx', 'obj'].includes(normalizedExt)) continue;
-    const haystack = rel.toLowerCase();
-    if (!q.split(/\s+/).every(term => haystack.includes(term))) continue;
+    if (!q.split(/\s+/).every(term => rel.toLowerCase().includes(term))) continue;
     const key = match[1];
     if (!groups.has(key)) groups.set(key, new Set());
     groups.get(key).add(normalizedExt);
@@ -220,16 +230,96 @@ async function searchSmithsonian(query, format) {
     sourceUrl: item.url || item.sourceUrl || item._links?.self?.href || '',
     thumbnailUrl: item.thumbnail || null,
     formats: item.model_type ? [normalizeFormat(item.model_type)] : (format ? [format] : []),
-    license: 'CC0',
-  }, 'smithsonian'))
-    .filter(item => !format || item.formats.includes(format));
+    license: item.license || 'Smithsonian Open Access',
+  }, 'smithsonian')).filter(item => !format || item.formats.includes(format));
+}
+
+function parse3dddFormats(html) {
+  const formats = new Set();
+  const lower = html.toLowerCase();
+  const patterns = [
+    [/(?:3ds\s*max|max\d{4}|\.max\b|\bmax\b)/i, 'max'],
+    [/\.fbx\b|\bfbx\b/i, 'fbx'],
+    [/\.obj\b|\bobj\b/i, 'obj'],
+    [/\.3ds\b|\b3ds\b/i, '3ds'],
+  ];
+  for (const [pattern, format] of patterns) {
+    if (pattern.test(lower)) formats.add(format);
+  }
+  return [...formats];
+}
+
+function extract3dddModelLinks(html) {
+  const results = [];
+  const seen = new Set();
+  const pattern = /<a[^>]+href=["'](\/3dmodels\/show\/[^"'#?]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = pattern.exec(html)) && results.length < SEARCH_LIMIT) {
+    const href = match[1];
+    if (seen.has(href)) continue;
+    seen.add(href);
+    const name = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!name || /загрузить модель/i.test(name)) continue;
+    results.push({
+      name,
+      url: `https://3ddd.ru${href}`,
+    });
+  }
+  return results;
+}
+
+async function inspect3dddModel(model) {
+  const cached = threeDDDCache.get(model.url);
+  if (cached && Date.now() - cached.time < CACHE_TTL_MS) return cached.data;
+  try {
+    const html = await fetchText(model.url, {
+      headers: {
+        'User-Agent': '3DModelFinderBot/1.0 (+link-only; respects original site access)',
+        'Accept-Language': 'ru,en;q=0.8',
+      },
+    });
+    const formats = parse3dddFormats(html);
+    const access = /\bFREE\b/i.test(html) ? 'free' : (/\bPRO\b/i.test(html) ? 'pro' : 'unknown');
+    const data = normalize({
+      name: model.name,
+      sourceUrl: model.url,
+      formats,
+      license: access === 'free' ? 'FREE on 3DDD' : access === 'pro' ? 'PRO on 3DDD' : null,
+      access: 'link-only',
+    }, '3ddd');
+    threeDDDCache.set(model.url, { time: Date.now(), data });
+    return data;
+  } catch (error) {
+    console.error('3ddd model:', model.url, error.message);
+    return null;
+  }
+}
+
+async function search3DDD(query, format) {
+  const supported = ['max', 'fbx', 'obj', '3ds'];
+  if (format && !supported.includes(format)) return [];
+  const url = `https://3ddd.ru/3dmodels?query=${encodeURIComponent(query)}&order=relevance`;
+  const html = await fetchText(url, {
+    headers: {
+      'User-Agent': '3DModelFinderBot/1.0 (+link-only; respects original site access)',
+      'Accept-Language': 'ru,en;q=0.8',
+    },
+  });
+  const candidates = extract3dddModelLinks(html);
+  const output = [];
+  for (let i = 0; i < candidates.length; i += THREE_DDD_CONCURRENCY) {
+    const batch = candidates.slice(i, i + THREE_DDD_CONCURRENCY);
+    const inspected = await Promise.all(batch.map(inspect3dddModel));
+    output.push(...inspected.filter(Boolean));
+  }
+  return output.filter(item => !format || item.formats.includes(format));
 }
 
 async function searchFallback(query, format) {
   if (!fetch3d) return [];
   try {
     const options = format ? { query, formats: [format], limit: SEARCH_LIMIT } : { query, limit: SEARCH_LIMIT };
-    const result = await fetch3d.searchAll(options, { mode: 'parallel', deduplicate: true });
+    const result = await fetch3d.searchAll(options);
     return (result?.models || []).map(item => normalize(item, item.source || '3dfetch-fallback')).filter(Boolean);
   } catch (error) {
     console.error('3dfetch fallback:', error.message);
@@ -243,6 +333,7 @@ async function searchModels(query, format) {
     ['sketchfab', searchSketchfab],
     ['polyhaven', searchPolyHaven],
     ['nasa', searchNasa],
+    ['3ddd', search3DDD],
     ...(process.env.SMITHSONIAN_API_KEY ? [['smithsonian', searchSmithsonian]] : []),
   ];
   const settled = await Promise.allSettled(directTasks.map(([, fn]) => fn(query, format)));
@@ -281,6 +372,7 @@ app.get('/providers', (_req, res) => {
       smithsonian: Boolean(process.env.SMITHSONIAN_API_KEY),
       thingiverse: Boolean(process.env.THINGIVERSE_API_TOKEN),
       myminifactory: Boolean(process.env.MYMINIFACTORY_API_KEY),
+      threeddd: true,
     },
   });
 });
