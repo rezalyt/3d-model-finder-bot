@@ -17,7 +17,7 @@ try {
 
   threeDFetch = new Fetch3D({
     ...(Object.keys(apiKeys).length ? { apiKeys } : {}),
-    timeout: Number(process.env.THREEDFETСH_TIMEOUT_MS || 15000),
+    timeout: Number(process.env.THREEDFETCH_TIMEOUT_MS || 15000),
   });
 } catch (err) {
   console.error("Failed to load @pikal6/3dfetch:", err);
