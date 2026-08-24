@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main, hardening-readme-tests-rate-limit]
+    branches: [main, hardening-readme-tests-rate-limit, search-quality-overhaul]
   pull_request:
 
 jobs:
@@ -27,4 +27,5 @@ jobs:
           cache: npm
           cache-dependency-path: search-service/package.json
       - run: npm install --prefix search-service --omit=dev
-      - run: node --check search-service/server.js
+      - run: npm test --prefix search-service
+      - run: npm run check --prefix search-service

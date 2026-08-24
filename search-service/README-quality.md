@@ -1,0 +1,1 @@
+Search quality overhaul: all configured 3dfetch providers are aggregated and results are ranked for relevance, format compatibility, metadata quality and source diversity.
