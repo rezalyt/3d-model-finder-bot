@@ -147,13 +147,11 @@ function buildQueryVariants(query, profile) {
   const variants = new Set([query]);
   const parts = [profile?.category, profile?.software].filter(Boolean);
   if (parts.length) variants.add(`${query} ${parts.join(' ')}`.trim());
-  const terms = normalizeText(query).split(' ').filter(Boolean);
-  if (terms.length > 1) variants.add(terms[terms.length - 1]);
-  return [...variants].slice(0, 3);
+  return [...variants].slice(0, 2);
 }
 
 async function searchModels(query, format, profile) {
-  const cacheKey = `${normalizeText(query)}::${format || 'any'}::${profile.task || ''}:${profile.category || ''}:${profile.software || ''}::v4`;
+  const cacheKey = `${normalizeText(query)}::${format || 'any'}::${profile.task || ''}:${profile.category || ''}:${profile.software || ''}::v5`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
   if (inflight.has(cacheKey)) return inflight.get(cacheKey);
