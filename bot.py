@@ -9,7 +9,7 @@ from collections import OrderedDict
 import aiohttp
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import AIORateLimiter, Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -35,9 +35,12 @@ CACHE_TTL = max(60, int(os.getenv("SEARCH_CACHE_TTL_SECONDS", str(30 * 60))))
 CACHE_MAX = max(32, int(os.getenv("SEARCH_CACHE_MAX_ENTRIES", "256")))
 REQUEST_TIMEOUT = max(5, int(os.getenv("SEARCH_REQUEST_TIMEOUT_SECONDS", "45")))
 MAX_QUERY_CHARS = max(40, int(os.getenv("MAX_QUERY_CHARS", "160")))
+SEARCH_RATE_LIMIT_SECONDS = max(1, float(os.getenv("SEARCH_RATE_LIMIT_SECONDS", "3")))
+SEARCH_RATE_LIMIT_MAX_USERS = max(32, int(os.getenv("SEARCH_RATE_LIMIT_MAX_USERS", "4096")))
 
 # Bounded LRU cache. Expired entries are removed on access/write; size can never grow unbounded.
 search_cache: OrderedDict[tuple[str, bool, str | None, str | None], dict] = OrderedDict()
+search_timestamps: OrderedDict[int, float] = OrderedDict()
 
 FORMAT_ALIASES = {
     "gltf": "gltf", "glb": "glb", "obj": "obj", "fbx": "fbx", "blend": "blend",
@@ -117,6 +120,23 @@ def cache_put(key, results):
         search_cache.pop(key_to_remove, None)
     while len(search_cache) > CACHE_MAX:
         search_cache.popitem(last=False)
+
+
+def rate_limit_search(user_id: int | None) -> float:
+    if user_id is None:
+        return 0.0
+    now = time.monotonic()
+    last = search_timestamps.get(user_id)
+    if last is not None:
+        remaining = SEARCH_RATE_LIMIT_SECONDS - (now - last)
+        if remaining > 0:
+            search_timestamps.move_to_end(user_id)
+            return remaining
+    search_timestamps[user_id] = now
+    search_timestamps.move_to_end(user_id)
+    while len(search_timestamps) > SEARCH_RATE_LIMIT_MAX_USERS:
+        search_timestamps.popitem(last=False)
+    return 0.0
 
 
 FORMAT_BUTTONS = [
@@ -336,6 +356,12 @@ async def send_page(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
 
 async def run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    user_id = update.effective_user.id if update.effective_user else None
+    remaining = rate_limit_search(user_id)
+    if remaining > 0:
+        await update.message.reply_text(f"⏳ Слишком частые запросы. Повторите через {remaining:.1f} сек.")
+        return
+
     query_text, typed_format = extract_and_normalize_query(text)
     selected_format = context.user_data.get("selected_format")
     category = context.user_data.get("selected_category")
@@ -441,6 +467,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not current_query:
             await context.bot.send_message(chat_id, "Сначала отправьте поисковый запрос.")
             return
+        user_id = update.effective_user.id if update.effective_user else None
+        remaining = rate_limit_search(user_id)
+        if remaining > 0:
+            await context.bot.send_message(chat_id, f"⏳ Слишком частые запросы. Повторите через {remaining:.1f} сек.")
+            return
         free_only = not context.user_data.get("free_only", False)
         context.user_data["free_only"] = free_only
         await context.bot.send_message(chat_id, "🔄 Обновляю поиск...")
@@ -467,7 +498,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 def build_application() -> Application:
-    app = Application.builder().token(TOKEN).concurrent_updates(True).build()
+    rate_limiter = AIORateLimiter(overall_max_rate=30, overall_time_period=1)
+    app = Application.builder().token(TOKEN).rate_limiter(rate_limiter).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
