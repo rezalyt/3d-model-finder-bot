@@ -4,10 +4,12 @@ import pytest
 
 
 @pytest.fixture(scope="module")
-def bot(monkeypatch_module):
-    monkeypatch_module.setenv("BOT_TOKEN", "test-token")
+def bot():
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("BOT_TOKEN", "test-token")
     module = importlib.import_module("bot")
-    return module
+    yield module
+    monkeypatch.undo()
 
 
 @pytest.fixture
@@ -40,7 +42,7 @@ def test_cache_is_bounded(bot, clear_state, monkeypatch):
     assert bot.cache_get(("c", False, None, None)) == [3]
 
 
-def test_cache_expires(bot, clear_state, monkeypatch):
+def test_cache_expires(bot, clear_state):
     bot.cache_put(("a", False, None, None), [1])
     key = ("a", False, None, None)
     bot.search_cache[key]["ts"] -= bot.CACHE_TTL + 1
