@@ -1,18 +1,20 @@
 import express from 'express';
 import { Fetch3D } from '@pikal6/3dfetch';
 import { diversifyAndRank, inferFormatFromNameOrUrl, normalizeModel, normalizeText } from './search-quality.js';
+import { SEARCH_PROVIDERS } from './provider-policy.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
-const LIMIT = Math.min(20, Math.max(8, Number(process.env.SEARCH_LIMIT || 20)));
-const PROVIDER_LIMIT = Math.min(50, Math.max(LIMIT, Number(process.env.PROVIDER_LIMIT || 35)));
+const LIMIT = Math.min(20, Math.max(12, Number(process.env.SEARCH_LIMIT || 12)));
+const PROVIDER_LIMIT = Math.min(40, Math.max(LIMIT, Number(process.env.PROVIDER_LIMIT || 24)));
 const TIMEOUT_MS = Math.min(30_000, Math.max(5_000, Number(process.env.HTTP_TIMEOUT_MS || 15_000)));
 const CACHE_MS = Math.max(30_000, Number(process.env.SEARCH_CACHE_TTL_MS || 120_000));
 const CACHE_MAX = Math.max(32, Number(process.env.SEARCH_CACHE_MAX_ENTRIES || 256));
 const RATE_LIMIT_WINDOW_MS = Math.max(1_000, Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000));
 const RATE_LIMIT_MAX_REQUESTS = Math.max(1, Number(process.env.RATE_LIMIT_MAX_REQUESTS || 30));
 const RATE_LIMIT_MAX_KEYS = Math.max(32, Number(process.env.RATE_LIMIT_MAX_KEYS || 4096));
-const MIN_BROAD_RESULTS = 10;
+const PROVIDER_RETRIES = Math.min(3, Math.max(1, Number(process.env.PROVIDER_RETRIES || 3)));
+const RETRY_BASE_MS = Math.min(2_000, Math.max(100, Number(process.env.PROVIDER_RETRY_BASE_MS || 300)));
 
 const ALIASES = { stp: 'step', igs: 'iges', blender: 'blend' };
 const FORMATS = new Set([
@@ -101,7 +103,10 @@ function consumeRateLimit(key) {
   while (rateLimit.size > RATE_LIMIT_MAX_KEYS) rateLimit.delete(rateLimit.keys().next().value);
   const current = rateLimit.get(key);
   if (current && current.count > RATE_LIMIT_MAX_REQUESTS) {
-    return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((RATE_LIMIT_WINDOW_MS - (now - current.startedAt)) / 1000)) };
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((RATE_LIMIT_WINDOW_MS - (now - current.startedAt)) / 1000)),
+    };
   }
   return { allowed: true, retryAfterSeconds: 0 };
 }
@@ -129,15 +134,37 @@ function mergeUnique(models) {
   return out;
 }
 
+async function delay(ms) {
+  await new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function withRetry(task, label) {
+  let lastError;
+  for (let attempt = 1; attempt <= PROVIDER_RETRIES; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+      if (attempt < PROVIDER_RETRIES) await delay(RETRY_BASE_MS * (2 ** (attempt - 1)));
+    }
+  }
+  throw new Error(`${label}: ${lastError?.message || 'request failed'}`);
+}
+
 async function runProviderSearch(query, format = null) {
   if (!fetch3d) return { models: [], errors: { '3dfetch': 'not initialized' } };
-  const errors = {};
   const options = { query, limit: PROVIDER_LIMIT };
   if (format) options.formats = [format];
   try {
-    const response = await fetch3d.searchAll(options, { mode: 'parallel', deduplicate: true });
-    Object.assign(errors, response?.errors || {});
-    return { models: mergeUnique(response?.models || []), errors };
+    const response = await withRetry(
+      () => fetch3d.searchAll(options, {
+        providers: SEARCH_PROVIDERS,
+        mode: 'parallel',
+        deduplicate: true,
+      }),
+      '3dfetch search',
+    );
+    return { models: mergeUnique(response?.models || []), errors: response?.errors || {} };
   } catch (error) {
     return { models: [], errors: { '3dfetch': error.message } };
   }
@@ -145,17 +172,13 @@ async function runProviderSearch(query, format = null) {
 
 function buildQueryVariants(query) {
   const variants = [query];
-  const terms = normalizeText(query).split(' ').filter(Boolean);
-  const meaningful = terms.filter(term => term.length >= 3);
-  if (meaningful.length > 1) {
-    const last = meaningful[meaningful.length - 1];
-    if (last !== query) variants.push(last);
-  }
+  const meaningful = normalizeText(query).split(' ').filter(term => term.length >= 3);
+  if (meaningful.length > 1) variants.push(meaningful[meaningful.length - 1]);
   return [...new Set(variants)].slice(0, 2);
 }
 
 async function searchModels(query, format) {
-  const cacheKey = `${normalizeText(query)}::${format || 'any'}::v3`;
+  const cacheKey = `${normalizeText(query)}::${format || 'any'}::v4`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
   if (inflight.has(cacheKey)) return inflight.get(cacheKey);
@@ -164,14 +187,13 @@ async function searchModels(query, format) {
     const all = [];
     const providerErrors = {};
     const variants = buildQueryVariants(query);
-
     const strictResults = await Promise.all(variants.map(variant => runProviderSearch(variant, format)));
     for (const result of strictResults) {
       all.push(...result.models);
       Object.assign(providerErrors, result.errors);
     }
 
-    if (format && all.length < MIN_BROAD_RESULTS) {
+    if (format && all.length < 8) {
       const broadResults = await Promise.all(variants.map(variant => runProviderSearch(variant, null)));
       for (const result of broadResults) {
         for (const model of result.models) {
@@ -199,23 +221,13 @@ app.get('/health', (_req, res) => res.json({
   ok: true,
   service: '3d-model-finder-search',
   threeDFetchLoaded: Boolean(fetch3d),
-  providers: fetch3d ? fetch3d.listProviders() : [],
+  providers: SEARCH_PROVIDERS,
   cacheEntries: cache.size,
 }));
 
-app.get('/providers', (_req, res) => {
-  const credentialProviders = {
-    sketchfab: Boolean(process.env.SKETCHFAB_API_TOKEN),
-    thingiverse: Boolean(process.env.THINGIVERSE_API_TOKEN),
-    myminifactory: Boolean(process.env.MYMINIFACTORY_API_KEY),
-  };
-  res.json({
-    providers: fetch3d ? fetch3d.listProviders().map(name => ({
-      name,
-      configured: credentialProviders[name] ?? true,
-    })) : [],
-  });
-});
+app.get('/providers', (_req, res) => res.json({
+  providers: SEARCH_PROVIDERS.map(name => ({ name, configured: true })),
+}));
 
 app.get('/search', async (req, res) => {
   const limitResult = consumeRateLimit(clientKey(req));
@@ -223,7 +235,6 @@ app.get('/search', async (req, res) => {
     res.set('Retry-After', String(limitResult.retryAfterSeconds));
     return res.status(429).json({ error: 'rate limit exceeded', retryAfterSeconds: limitResult.retryAfterSeconds });
   }
-
   const parsed = normalizeQuery(req.query.q || '');
   const format = normFormat(req.query.format || parsed.format) || null;
   if (!parsed.query) return res.status(400).json({ error: 'q is required' });
