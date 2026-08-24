@@ -1,9 +1,12 @@
-.env 
-venv/ 
-__pycache__/ 
-*.pyc 
-*.log 
-cmd.txt 
-setup.sh 
-t.meModelFinder3D_Bot.txt 
-"полезные настройки.txt" 
+.env
+.env.*
+!.env.example
+venv/
+__pycache__/
+*.pyc
+*.log
+cmd.txt
+setup.sh
+t.meModelFinder3D_Bot.txt
+*.local
+.DS_Store
