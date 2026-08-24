@@ -51,13 +51,9 @@ export function normalizeModel(model) {
     metadata.polygonCount, metadata.polygons, metadata.triangles,
     metadata.mesh?.polygonCount, metadata.mesh?.triangles,
   );
-  const textureCount = finiteNumber(
-    model.textureCount, model.texturesCount,
-    metadata.textureCount, metadata.texturesCount,
-  );
-  const hasTextures = Boolean(
-    model.hasTextures ?? model.textures ?? metadata.hasTextures ?? metadata.textures ?? textureCount > 0,
-  );
+  const textureCount = finiteNumber(model.textureCount, model.texturesCount, metadata.textureCount, metadata.texturesCount);
+  const rawTextures = model.hasTextures ?? model.textures ?? metadata.hasTextures ?? metadata.textures;
+  const hasTextures = Array.isArray(rawTextures) ? rawTextures.length > 0 : Boolean(rawTextures) || textureCount > 0;
 
   return {
     ...model,
@@ -115,19 +111,15 @@ export function scoreModel(model, query, requestedFormat = null) {
   if (requestedFormat) {
     if (!item.formats.includes(requestedFormat)) return -Infinity;
     score += 28;
-  } else if (item.formats.length) {
-    score += Math.min(item.formats.length, 5) * 2;
-  }
+  } else if (item.formats.length) score += Math.min(item.formats.length, 5) * 2;
 
   const modernCount = item.formats.filter(format => MODERN_FORMATS.has(format)).length;
   score += modernCount * 5;
   if (item.formats.length && item.formats.every(format => OUTDATED_ONLY_FORMATS.has(format))) score -= 10;
-
   if (item.thumbnailUrl) score += 8;
   if (item.downloadUrl) score += 7;
   if (item.license) score += 4;
   if (item.description.length >= 80) score += 3;
-
   if (item.hasTextures) score += 10;
   else if (item.textureCount === 0) score -= 5;
 
@@ -147,7 +139,6 @@ export function scoreModel(model, query, requestedFormat = null) {
   else if (item.rating > 0 && item.rating < 3.0) score -= 10;
   if (item.metadata?.staffpickedAt || item.metadata?.featured || item.metadata?.isStaffPicked) score += 8;
   if (item.metadata?.isDownloadable === false) score -= 6;
-
   return score;
 }
 
