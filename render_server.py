@@ -12,7 +12,9 @@ os.environ.setdefault("SEARCH_SERVICE_URL", "http://127.0.0.1:8787")
 
 import bot  # noqa: E402
 
-WEB_PORT = int(os.getenv("PORT", "10000"))
+# Railway's public service port is explicitly configured as 10000 for this service.
+# Use a separate variable for the web server so the child search process can keep 8787.
+WEB_PORT = int(os.getenv("WEB_PORT", "10000"))
 SEARCH_PORT = int(os.getenv("SEARCH_PORT", "8787"))
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook")
 WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
@@ -127,4 +129,5 @@ app.on_cleanup.append(on_cleanup)
 
 
 if __name__ == "__main__":
+    print(f"3D bot web server listening on port {WEB_PORT}; search service on {SEARCH_PORT}", flush=True)
     web.run_app(app, host="0.0.0.0", port=WEB_PORT)
