@@ -1,11 +1,13 @@
 import express from 'express';
 import { Fetch3D } from '@pikal6/3dfetch';
 import { diversifyAndRank, inferFormatFromNameOrUrl, normalizeModel, normalizeText } from './search-quality.js';
+import { MVP_SEARCH_PROVIDERS, providerAllowed } from './provider-policy.js';
+import { inferTaskProfile } from './task-profiles.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
-const LIMIT = Math.min(20, Math.max(8, Number(process.env.SEARCH_LIMIT || 20)));
-const PROVIDER_LIMIT = Math.min(50, Math.max(LIMIT, Number(process.env.PROVIDER_LIMIT || 35)));
+const LIMIT = Math.min(20, Math.max(8, Number(process.env.SEARCH_LIMIT || 12)));
+const PROVIDER_LIMIT = Math.min(50, Math.max(LIMIT, Number(process.env.PROVIDER_LIMIT || 24)));
 const TIMEOUT_MS = Math.min(30_000, Math.max(5_000, Number(process.env.HTTP_TIMEOUT_MS || 15_000)));
 const CACHE_MS = Math.max(30_000, Number(process.env.SEARCH_CACHE_TTL_MS || 120_000));
 const CACHE_MAX = Math.max(32, Number(process.env.SEARCH_CACHE_MAX_ENTRIES || 256));
@@ -15,25 +17,18 @@ const RATE_LIMIT_MAX_KEYS = Math.max(32, Number(process.env.RATE_LIMIT_MAX_KEYS 
 const MIN_BROAD_RESULTS = 10;
 
 const ALIASES = { stp: 'step', igs: 'iges', blender: 'blend' };
-const FORMATS = new Set([
-  'gltf', 'glb', 'obj', 'fbx', 'blend', 'usd', 'usdz', 'stl', '3mf', 'dae', 'ply', 'step', 'iges', 'off',
-  'max', 'c4d', 'ma', 'mb', 'abc', '3ds', 'maya', 'fb',
-]);
+const FORMATS = new Set(['gltf', 'glb', 'obj', 'fbx', 'blend', 'usd', 'usdz', 'stl', '3mf', 'dae', 'ply', 'step', 'iges', 'off', 'max', 'c4d', 'ma', 'mb', 'abc', '3ds', 'maya', 'fb']);
 const FORMAT_RE = /(?<![a-z0-9])(?:gltf|glb|obj|fbx|blend|usd|usdz|stl|3mf|dae|ply|step|stp|iges|igs|off|max|c4d|abc|3ds)(?![a-z0-9])/i;
 
 const RUSSIAN_ALIASES = {
-  'кот': 'cat', 'кота': 'cat', 'кошку': 'cat', 'кошка': 'cat', 'кошки': 'cats', 'котенок': 'kitten', 'котёнок': 'kitten',
-  'собака': 'dog', 'собаку': 'dog', 'пес': 'dog', 'пса': 'dog', 'щенок': 'puppy', 'лошадь': 'horse', 'лошади': 'horse',
-  'лошадью': 'horse', 'дерево': 'tree', 'ёлка': 'christmas tree', 'елка': 'christmas tree', 'стул': 'chair', 'стулья': 'chairs',
-  'кресло': 'armchair', 'диван': 'sofa', 'стол': 'table', 'машина': 'car', 'автомобиль': 'car', 'авто': 'car',
-  'робот': 'robot', 'дом': 'house', 'здание': 'building', 'человек': 'human', 'голова': 'head', 'лицо': 'face', 'череп': 'skull',
-  'дракон': 'dragon', 'динозавр': 'dinosaur', 'самолет': 'airplane', 'самолёт': 'airplane', 'корабль': 'ship', 'лодка': 'boat',
-  'статуя': 'statue', 'скульптура': 'sculpture', 'лампа': 'lamp', 'кровать': 'bed', 'шкаф': 'cabinet', 'мотоцикл': 'motorcycle',
+  'берёза': 'birch', 'береза': 'birch', 'сосна': 'pine', 'ель': 'fir', 'ёлка': 'christmas tree', 'елка': 'christmas tree',
+  'куст': 'shrub', 'кустарник': 'shrub', 'растение': 'plant', 'цветок': 'flower', 'трава': 'grass', 'фонарь': 'lamp', 'светильник': 'lamp',
+  'скамейка': 'bench', 'пергола': 'pergola', 'беседка': 'gazebo', 'забор': 'fence', 'камень': 'rock', 'валун': 'boulder',
+  'дорожка': 'path', 'клён': 'maple', 'клен': 'maple', 'машина': 'car', 'автомобиль': 'car', 'человек': 'human',
+  'статуя': 'statue', 'скульптура': 'sculpture', 'дом': 'house', 'здание': 'building', 'стол': 'table', 'стул': 'chair',
+  'кресло': 'armchair', 'диван': 'sofa', 'лампа': 'lamp', 'дракон': 'dragon', 'кот': 'cat', 'собака': 'dog', 'робот': 'robot',
 };
-const STOP_WORDS = new Set([
-  'найди', 'найти', 'поищи', 'ищи', 'ищу', 'поиск', 'покажи', 'показать', 'модель', 'модели', '3d', 'мне', 'нужен', 'нужна',
-  'нужно', 'для', 'сделай', 'скачай', 'скачать', 'файл', 'файлы', 'бесплатный', 'бесплатная', 'бесплатные',
-]);
+const STOP_WORDS = new Set(['найди', 'найти', 'поищи', 'ищи', 'ищу', 'поиск', 'покажи', 'показать', 'модель', 'модели', '3d', 'мне', 'нужен', 'нужна', 'нужно', 'для', 'сделай', 'скачай', 'скачать', 'файл', 'файлы', 'бесплатный', 'бесплатная', 'бесплатные']);
 
 let fetch3d = null;
 try {
@@ -129,13 +124,18 @@ function mergeUnique(models) {
   return out;
 }
 
-async function runProviderSearch(query, format = null) {
+async function runProviderSearch(query, format = null, category = null) {
   if (!fetch3d) return { models: [], errors: { '3dfetch': 'not initialized' } };
   const errors = {};
   const options = { query, limit: PROVIDER_LIMIT };
   if (format) options.formats = [format];
+  if (category) options.category = category;
   try {
-    const response = await fetch3d.searchAll(options, { mode: 'parallel', deduplicate: true });
+    const response = await fetch3d.searchAll(options, {
+      providers: MVP_SEARCH_PROVIDERS,
+      mode: 'parallel',
+      deduplicate: true,
+    });
     Object.assign(errors, response?.errors || {});
     return { models: mergeUnique(response?.models || []), errors };
   } catch (error) {
@@ -143,19 +143,17 @@ async function runProviderSearch(query, format = null) {
   }
 }
 
-function buildQueryVariants(query) {
-  const variants = [query];
+function buildQueryVariants(query, profile) {
+  const variants = new Set([query]);
+  const parts = [profile?.category, profile?.software].filter(Boolean);
+  if (parts.length) variants.add(`${query} ${parts.join(' ')}`.trim());
   const terms = normalizeText(query).split(' ').filter(Boolean);
-  const meaningful = terms.filter(term => term.length >= 3);
-  if (meaningful.length > 1) {
-    const last = meaningful[meaningful.length - 1];
-    if (last !== query) variants.push(last);
-  }
-  return [...new Set(variants)].slice(0, 2);
+  if (terms.length > 1) variants.add(terms[terms.length - 1]);
+  return [...variants].slice(0, 3);
 }
 
-async function searchModels(query, format) {
-  const cacheKey = `${normalizeText(query)}::${format || 'any'}::v3`;
+async function searchModels(query, format, profile) {
+  const cacheKey = `${normalizeText(query)}::${format || 'any'}::${profile.task || ''}:${profile.category || ''}:${profile.software || ''}::v4`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
   if (inflight.has(cacheKey)) return inflight.get(cacheKey);
@@ -163,16 +161,15 @@ async function searchModels(query, format) {
   const promise = (async () => {
     const all = [];
     const providerErrors = {};
-    const variants = buildQueryVariants(query);
-
-    const strictResults = await Promise.all(variants.map(variant => runProviderSearch(variant, format)));
+    const variants = buildQueryVariants(query, profile);
+    const strictResults = await Promise.all(variants.map(variant => runProviderSearch(variant, format, profile.category)));
     for (const result of strictResults) {
       all.push(...result.models);
       Object.assign(providerErrors, result.errors);
     }
 
     if (format && all.length < MIN_BROAD_RESULTS) {
-      const broadResults = await Promise.all(variants.map(variant => runProviderSearch(variant, null)));
+      const broadResults = await Promise.all(variants.map(variant => runProviderSearch(variant, null, profile.category)));
       for (const result of broadResults) {
         for (const model of result.models) {
           const formats = model.formats.length ? model.formats : inferFormatFromNameOrUrl(model);
@@ -182,7 +179,7 @@ async function searchModels(query, format) {
       }
     }
 
-    const ranked = diversifyAndRank(mergeUnique(all), query, format, LIMIT);
+    const ranked = diversifyAndRank(mergeUnique(all), query, format, LIMIT, profile);
     const data = { results: ranked, errors: providerErrors };
     cacheSet(cacheKey, data);
     return data;
@@ -199,21 +196,19 @@ app.get('/health', (_req, res) => res.json({
   ok: true,
   service: '3d-model-finder-search',
   threeDFetchLoaded: Boolean(fetch3d),
-  providers: fetch3d ? fetch3d.listProviders() : [],
+  configuredProviders: MVP_SEARCH_PROVIDERS.filter(name => fetch3d ? fetch3d.listProviders().includes(name) : false),
   cacheEntries: cache.size,
 }));
 
 app.get('/providers', (_req, res) => {
-  const credentialProviders = {
-    sketchfab: Boolean(process.env.SKETCHFAB_API_TOKEN),
-    thingiverse: Boolean(process.env.THINGIVERSE_API_TOKEN),
-    myminifactory: Boolean(process.env.MYMINIFACTORY_API_KEY),
-  };
+  const available = fetch3d ? fetch3d.listProviders() : [];
   res.json({
-    providers: fetch3d ? fetch3d.listProviders().map(name => ({
+    providers: MVP_SEARCH_PROVIDERS.map(name => ({
       name,
-      configured: credentialProviders[name] ?? true,
-    })) : [],
+      available: available.includes(name),
+      searchAllowed: providerAllowed(name, 'search'),
+      sourceLinkOnly: providerAllowed(name, 'sourceLink') && !providerAllowed(name, 'download'),
+    })),
   });
 });
 
@@ -226,12 +221,20 @@ app.get('/search', async (req, res) => {
 
   const parsed = normalizeQuery(req.query.q || '');
   const format = normFormat(req.query.format || parsed.format) || null;
+  const profile = inferTaskProfile(parsed.query, req.query.task || null, req.query.category || null);
+
   if (!parsed.query) return res.status(400).json({ error: 'q is required' });
   if (format && !FORMATS.has(format)) return res.status(400).json({ error: 'unsupported format' });
 
   try {
-    const { results, errors } = await searchModels(parsed.query, format);
-    const response = { query: parsed.query, format, count: results.length, results };
+    const { results, errors } = await searchModels(parsed.query, format, profile);
+    const response = {
+      query: parsed.query,
+      format,
+      task: profile,
+      count: results.length,
+      results,
+    };
     if (process.env.SEARCH_DEBUG === 'true' && Object.keys(errors).length) response.providerErrors = errors;
     res.json(response);
   } catch (error) {
