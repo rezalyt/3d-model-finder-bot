@@ -15,7 +15,7 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements-dev.txt
-      - run: pytest -q
+      - run: PYTHONPATH=. pytest -q
 
   search-service-check:
     runs-on: ubuntu-latest
