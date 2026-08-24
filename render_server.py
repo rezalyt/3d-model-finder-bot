@@ -7,20 +7,17 @@ from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-# The search service stays private inside the same container.
 os.environ.setdefault("SEARCH_SERVICE_URL", "http://127.0.0.1:8787")
 
 import bot  # noqa: E402
 
-# Railway's public service port is explicitly configured as 10000 for this service.
-# Use a separate variable for the web server so the child search process can keep 8787.
-WEB_PORT = int(os.getenv("WEB_PORT", "10000"))
+# Railway provides PORT for the public HTTP service. Never hard-code the public
+# listener: the platform healthcheck/proxy uses the assigned PORT.
+WEB_PORT = int(os.getenv("PORT", os.getenv("WEB_PORT", "10000")))
 SEARCH_PORT = int(os.getenv("SEARCH_PORT", "8787"))
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook")
 WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 
-# Railway exposes RAILWAY_PUBLIC_DOMAIN when a public domain is assigned.
-# PUBLIC_URL can be used as an explicit override on any hosting platform.
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 RAILWAY_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip().rstrip("/")
 EXTERNAL_URL = PUBLIC_URL or (f"https://{RAILWAY_DOMAIN}" if RAILWAY_DOMAIN else "")
@@ -62,8 +59,6 @@ def stop_search_service():
 
 
 async def health(_request: web.Request) -> web.Response:
-    # Keep this endpoint lightweight. Railway uses it during deployment, so it must
-    # not wait for Telegram or any external provider to finish initializing.
     search_ok = search_process is not None and search_process.poll() is None
     return web.json_response({
         "ok": True,
@@ -104,7 +99,6 @@ async def configure_telegram():
     try:
         await application.initialize()
         await application.start()
-
         webhook_url = f"{EXTERNAL_URL}{WEBHOOK_PATH}"
         await application.bot.set_webhook(
             url=webhook_url,
@@ -121,18 +115,10 @@ async def configure_telegram():
 
 async def on_startup(_app: web.Application):
     global telegram_init_task
-
     start_search_service()
     await asyncio.sleep(1)
-
     if not EXTERNAL_URL:
-        raise RuntimeError(
-            "No public URL configured. Set PUBLIC_URL or assign a Railway public domain."
-        )
-
-    # Do not block aiohttp startup on Telegram API/network calls. Railway's
-    # healthcheck must be able to reach /health immediately after the web server
-    # starts. Telegram initialization continues in the background.
+        raise RuntimeError("No public URL configured. Set PUBLIC_URL or assign a Railway public domain.")
     telegram_init_task = asyncio.create_task(configure_telegram())
     print("Web server startup complete; Telegram initialization running in background", flush=True)
 
@@ -142,7 +128,6 @@ async def on_cleanup(_app: web.Application):
         telegram_init_task.cancel()
         with suppress(asyncio.CancelledError):
             await telegram_init_task
-
     with suppress(Exception):
         await application.bot.delete_webhook(drop_pending_updates=False)
     with suppress(Exception):
