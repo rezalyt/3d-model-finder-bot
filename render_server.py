@@ -31,6 +31,8 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.hand
 application.add_handler(CallbackQueryHandler(bot.handle_callback))
 
 search_process = None
+telegram_ready = asyncio.Event()
+telegram_init_task = None
 
 
 def start_search_service():
@@ -60,27 +62,37 @@ def stop_search_service():
 
 
 async def health(_request: web.Request) -> web.Response:
+    # Keep this endpoint lightweight. Railway uses it during deployment, so it must
+    # not wait for Telegram or any external provider to finish initializing.
     search_ok = search_process is not None and search_process.poll() is None
     return web.json_response({
-        "ok": search_ok,
+        "ok": True,
         "service": "3d-model-finder-bot",
-        "telegram": True,
+        "telegram_ready": telegram_ready.is_set(),
         "search_service": search_ok,
         "search_service_url": f"http://127.0.0.1:{SEARCH_PORT}",
     })
 
 
 async def webhook(request: web.Request) -> web.Response:
+    print(f"Telegram webhook request: {request.method} {request.path}", flush=True)
+
     if WEBHOOK_SECRET:
         supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if supplied != WEBHOOK_SECRET:
+            print("Telegram webhook rejected: invalid secret", flush=True)
             raise web.HTTPUnauthorized(text="invalid webhook secret")
+
+    if not telegram_ready.is_set():
+        print("Telegram webhook received before bot initialization completed", flush=True)
+        return web.json_response({"ok": False, "error": "telegram bot is still initializing"}, status=503)
 
     try:
         payload = await request.json()
         update = Update.de_json(payload, application.bot)
         if update is None:
             raise ValueError("invalid Telegram update")
+        print(f"Telegram update received: {payload.get('update_id')}", flush=True)
         await application.process_update(update)
         return web.json_response({"ok": True})
     except Exception as exc:
@@ -88,7 +100,28 @@ async def webhook(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
 
+async def configure_telegram():
+    try:
+        await application.initialize()
+        await application.start()
+
+        webhook_url = f"{EXTERNAL_URL}{WEBHOOK_PATH}"
+        await application.bot.set_webhook(
+            url=webhook_url,
+            secret_token=WEBHOOK_SECRET or None,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=False,
+        )
+        telegram_ready.set()
+        print(f"Telegram webhook configured: {webhook_url}", flush=True)
+        print("Telegram bot is ready to receive updates", flush=True)
+    except Exception as exc:
+        print(f"Telegram initialization error: {exc}", flush=True)
+
+
 async def on_startup(_app: web.Application):
+    global telegram_init_task
+
     start_search_service()
     await asyncio.sleep(1)
 
@@ -97,20 +130,19 @@ async def on_startup(_app: web.Application):
             "No public URL configured. Set PUBLIC_URL or assign a Railway public domain."
         )
 
-    await application.initialize()
-    await application.start()
-
-    webhook_url = f"{EXTERNAL_URL}{WEBHOOK_PATH}"
-    await application.bot.set_webhook(
-        url=webhook_url,
-        secret_token=WEBHOOK_SECRET or None,
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=False,
-    )
-    print(f"Telegram webhook configured: {webhook_url}", flush=True)
+    # Do not block aiohttp startup on Telegram API/network calls. Railway's
+    # healthcheck must be able to reach /health immediately after the web server
+    # starts. Telegram initialization continues in the background.
+    telegram_init_task = asyncio.create_task(configure_telegram())
+    print("Web server startup complete; Telegram initialization running in background", flush=True)
 
 
 async def on_cleanup(_app: web.Application):
+    if telegram_init_task is not None and not telegram_init_task.done():
+        telegram_init_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await telegram_init_task
+
     with suppress(Exception):
         await application.bot.delete_webhook(drop_pending_updates=False)
     with suppress(Exception):
