@@ -16,10 +16,13 @@ const SOFTWARE_FORMATS = {
   lumion: new Set(['fbx', 'obj', 'dae']),
   enscape: new Set(['fbx', 'obj', 'gltf', 'glb']),
   twinmotion: new Set(['fbx', 'gltf', 'glb', 'obj']),
+  sketchup_pro: new Set(['skp', 'fbx', 'obj', 'dae']),
+  revit: new Set(['rvt', 'fbx', 'obj', 'gltf', 'glb']),
+  archicad: new Set(['fbx', 'obj', 'gltf', 'glb']),
 };
 
 const GREEN_SOURCES = new Set(['polyhaven', 'ambientcg']);
-const COMMON_NOISE = new Set(['3d', 'model', 'models', 'free', 'download', 'object', 'asset', 'mesh', 'low', 'poly', 'high', 'quality', 'realistic', 'render', 'game', 'ready']);
+const COMMON_NOISE = new Set(['3d', 'model', 'models', 'free', 'download', 'object', 'asset', 'mesh', 'low', 'poly', 'high', 'quality', 'realistic', 'render', 'game', 'ready', 'для', 'мне', 'найди', 'нужен', 'нужна', 'нужно']);
 
 export function normalizeText(value) {
   return String(value || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
@@ -41,15 +44,7 @@ export function normalizeModel(model) {
   const downloads = Number(model.downloadCount ?? model.downloads ?? metadata.downloadCount ?? metadata.downloads ?? 0);
   const views = Number(model.viewCount ?? model.views ?? metadata.viewCount ?? metadata.views ?? 0);
   return {
-    ...model,
-    name,
-    description,
-    source,
-    sourceUrl,
-    thumbnailUrl,
-    formats,
-    tags,
-    categories,
+    ...model, name, description, source, sourceUrl, thumbnailUrl, formats, tags, categories,
     license: String(model.license || '').trim() || null,
     rating: Number.isFinite(rating) ? rating : 0,
     likes: Number.isFinite(likes) ? likes : 0,
@@ -59,29 +54,31 @@ export function normalizeModel(model) {
   };
 }
 
-function log10(value) {
-  return value > 0 ? Math.log10(value + 1) : 0;
+function log10(value) { return value > 0 ? Math.log10(value + 1) : 0; }
+function categoryTerms(category) { return LANDSCAPE_TERMS[category] || []; }
+function hasAny(text, terms) { return terms.some(term => text.includes(normalizeText(term))); }
+
+function queryTerms(query) {
+  return normalizeText(query).split(' ').filter(term => term && !COMMON_NOISE.has(term));
 }
 
-function taskTerms(profile = {}) {
-  return [profile.task || '', profile.category || '', profile.software || '']
-    .filter(Boolean).map(normalizeText);
-}
-
-function categoryTerms(category) {
-  return LANDSCAPE_TERMS[category] || [];
-}
-
-function hasAny(haystack, terms) {
-  return terms.some(term => haystack.includes(normalizeText(term)));
+function relevanceGate(item, query) {
+  const terms = queryTerms(query);
+  if (!terms.length) return true;
+  const title = normalizeText(item.name);
+  const tags = normalizeText([...(item.tags || []), ...(item.categories || [])].join(' '));
+  const searchable = `${title} ${tags}`;
+  const matched = terms.filter(term => searchable.includes(term)).length;
+  const required = terms.length === 1 ? 1 : Math.max(1, Math.ceil(terms.length * 0.7));
+  if (matched < required) return false;
+  if (terms.length === 1 && !title.includes(terms[0]) && !tags.includes(terms[0])) return false;
+  return true;
 }
 
 function technicalSignals(item) {
   const metadata = item.metadata || {};
   const textureFlags = [metadata.pbr, metadata.hasPbr, metadata.textures, metadata.hasTextures, metadata.materials].filter(Boolean).length;
-  const hasDimensions = Array.isArray(metadata.dimensions)
-    ? metadata.dimensions.length === 3
-    : Boolean(metadata.dimensions && typeof metadata.dimensions === 'object');
+  const hasDimensions = Array.isArray(metadata.dimensions) ? metadata.dimensions.length === 3 : Boolean(metadata.dimensions && typeof metadata.dimensions === 'object');
   const hasPolycount = Number.isFinite(Number(metadata.polycount ?? metadata.triangles ?? metadata.polygons));
   const hasLods = Boolean(metadata.lods || metadata.lodCount || metadata.hasLod);
   return { textureFlags, hasDimensions, hasPolycount, hasLods };
@@ -89,50 +86,50 @@ function technicalSignals(item) {
 
 export function scoreComponents(model, query, requestedFormat = null, profile = {}) {
   const item = normalizeModel(model);
-  if (!item || !item.name || !item.sourceUrl) return null;
+  if (!item || !item.name || !item.sourceUrl || !GREEN_SOURCES.has(item.source)) return null;
+  if (!relevanceGate(item, query)) return null;
+
   const q = normalizeText(query);
   const title = normalizeText(item.name);
-  const body = normalizeText([item.name, item.description, ...item.tags, ...item.categories].join(' '));
-  const qTerms = q.split(' ').filter(term => term && !COMMON_NOISE.has(term));
+  const titleAndTags = normalizeText([item.name, ...item.tags, ...item.categories].join(' '));
+  const description = normalizeText(item.description);
+  const qTerms = queryTerms(query);
 
   let relevance = 0;
-  if (title === q) relevance += 50;
-  else if (title.startsWith(q)) relevance += 36;
-  else if (title.includes(q)) relevance += 26;
+  if (title === q) relevance += 55;
+  else if (title.startsWith(q)) relevance += 42;
+  else if (title.includes(q)) relevance += 32;
   let matched = 0;
   for (const term of qTerms) {
-    if (title.includes(term)) { relevance += 16; matched += 1; }
-    else if (body.includes(term)) { relevance += 8; matched += 1; }
+    if (title.includes(term)) { relevance += 18; matched += 1; }
+    else if (titleAndTags.includes(term)) { relevance += 11; matched += 1; }
+    else if (description.includes(term)) relevance += 3;
   }
-  if (qTerms.length) relevance += (matched / qTerms.length) * 30;
+  relevance += qTerms.length ? (matched / qTerms.length) * 25 : 0;
 
-  let taskFit = 0;
-  if ((profile.task || 'landscape') === 'landscape') taskFit += 10;
-  if (profile.category && hasAny(body, categoryTerms(profile.category))) taskFit += 24;
+  let taskFit = profile.task ? 6 : 0;
+  if (profile.category && hasAny(titleAndTags, categoryTerms(profile.category))) taskFit += 24;
   if (profile.software) {
-    const compatibleFormats = SOFTWARE_FORMATS[profile.software];
-    if (compatibleFormats && item.formats.some(format => compatibleFormats.has(format))) taskFit += 12;
-    if (body.includes(normalizeText(profile.software))) taskFit += 5;
-  }
-  for (const term of taskTerms(profile)) {
-    if (term && body.includes(term)) taskFit += 3;
+    const compatible = SOFTWARE_FORMATS[profile.software];
+    if (compatible && item.formats.some(format => compatible.has(format))) taskFit += 12;
+    if (titleAndTags.includes(normalizeText(profile.software))) taskFit += 5;
   }
 
   let formatFit = 0;
   if (requestedFormat) {
     if (!item.formats.includes(requestedFormat)) return null;
     formatFit += 25;
-  } else if (profile.software && SOFTWARE_FORMATS[profile.software]) {
-    if (item.formats.some(format => SOFTWARE_FORMATS[profile.software].has(format))) formatFit += 10;
+  } else if (profile.software && SOFTWARE_FORMATS[profile.software] && item.formats.some(format => SOFTWARE_FORMATS[profile.software].has(format))) {
+    formatFit += 10;
   }
 
-  const technicalSignalsData = technicalSignals(item);
+  const signals = technicalSignals(item);
   let technical = 0;
   if (item.thumbnailUrl) technical += 5;
-  if (technicalSignalsData.textureFlags > 0) technical += Math.min(8, technicalSignalsData.textureFlags * 2);
-  if (technicalSignalsData.hasDimensions) technical += 4;
-  if (technicalSignalsData.hasPolycount) technical += 4;
-  if (technicalSignalsData.hasLods) technical += 4;
+  if (signals.textureFlags > 0) technical += Math.min(8, signals.textureFlags * 2);
+  if (signals.hasDimensions) technical += 4;
+  if (signals.hasPolycount) technical += 4;
+  if (signals.hasLods) technical += 4;
   if (item.formats.length >= 2) technical += 3;
   if (item.description.length >= 80) technical += 2;
 
@@ -143,8 +140,7 @@ export function scoreComponents(model, query, requestedFormat = null, profile = 
   else if (item.rating >= 4) popularity += 3;
   else if (item.rating > 0 && item.rating < 3) popularity -= 3;
 
-  const source = GREEN_SOURCES.has(item.source) ? 4 : 0;
-  return { relevance, taskFit, formatFit, technical, popularity, source };
+  return { relevance, taskFit, formatFit, technical, popularity, source: 4 };
 }
 
 export function scoreModel(model, query, requestedFormat = null, profile = {}) {
@@ -153,16 +149,14 @@ export function scoreModel(model, query, requestedFormat = null, profile = {}) {
   return Object.values(components).reduce((sum, value) => sum + value, 0);
 }
 
-function duplicateKey(model) {
-  return `${model.source}|${model.sourceUrl}`;
-}
+function duplicateKey(model) { return `${model.source}|${model.sourceUrl}`; }
 
 export function diversifyAndRank(models, query, requestedFormat = null, limit = 20, profile = {}) {
   const candidates = [];
   const seenUrls = new Set();
   for (const raw of models) {
     const item = normalizeModel(raw);
-    if (!item || !item.sourceUrl) continue;
+    if (!item || !item.sourceUrl || !item.thumbnailUrl) continue;
     const urlKey = item.sourceUrl.toLowerCase();
     if (seenUrls.has(urlKey)) continue;
     seenUrls.add(urlKey);
