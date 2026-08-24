@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main, hardening-readme-tests-rate-limit, search-quality-overhaul, landscape-search-v1]
+    branches: [main, hardening-readme-tests-rate-limit, search-quality-overhaul, landscape-search-v1, fix/search-relevance-v2]
   pull_request:
 
 jobs:
