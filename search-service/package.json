@@ -1,6 +1,6 @@
 {
   "name": "3d-model-finder-search-service",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,6 +11,6 @@
   },
   "dependencies": {
     "@pikal6/3dfetch": "1.0.0",
-    "express": "^4.21.2"
+    "express": "5.2.1"
   }
 }
