@@ -13,6 +13,8 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 os.environ.setdefault("SEARCH_SERVICE_URL", "http://127.0.0.1:8787")
 
 import bot  # noqa: E402
+from bot_features import handle_callback as enhanced_handle_callback  # noqa: E402
+from bot_features import handle_text as enhanced_handle_text  # noqa: E402
 
 WEB_PORT = int(os.getenv("PORT", os.getenv("WEB_PORT", "10000")))
 SEARCH_PORT = int(os.getenv("SEARCH_PORT", "8787"))
@@ -30,8 +32,8 @@ if REQUIRE_WEBHOOK_SECRET and not WEBHOOK_SECRET:
 
 application = Application.builder().token(bot.TOKEN).concurrent_updates(True).build()
 application.add_handler(CommandHandler("start", bot.start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
-application.add_handler(CallbackQueryHandler(bot.handle_callback))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, enhanced_handle_text))
+application.add_handler(CallbackQueryHandler(enhanced_handle_callback))
 application.add_error_handler(bot.error_handler)
 
 search_process = None
