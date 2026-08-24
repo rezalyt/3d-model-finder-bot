@@ -28,6 +28,17 @@ export function normalizeText(value) {
   return String(value || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
+export function hasUsableThumbnail(model) {
+  const value = String(model?.thumbnailUrl || '').trim();
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeModel(model) {
   if (!model) return null;
   const metadata = model.metadata && typeof model.metadata === 'object' ? model.metadata : {};
@@ -38,7 +49,7 @@ export function normalizeModel(model) {
   const description = String(model.description || '').trim();
   const source = String(model.source || 'unknown').toLowerCase();
   const sourceUrl = String(model.sourceUrl || '').trim();
-  const thumbnailUrl = String(model.thumbnailUrl || model.thumbnail || '').trim() || null;
+  const thumbnailUrl = String(model.thumbnailUrl || '').trim() || null;
   const rating = Number(model.ratingAvg ?? model.rating ?? metadata.ratingAvg ?? metadata.rating ?? 0);
   const likes = Number(model.likesCount ?? model.likeCount ?? model.likes ?? metadata.likesCount ?? metadata.likes ?? 0);
   const downloads = Number(model.downloadCount ?? model.downloads ?? metadata.downloadCount ?? metadata.downloads ?? 0);
@@ -86,7 +97,7 @@ function technicalSignals(item) {
 
 export function scoreComponents(model, query, requestedFormat = null, profile = {}) {
   const item = normalizeModel(model);
-  if (!item || !item.name || !item.sourceUrl || !GREEN_SOURCES.has(item.source)) return null;
+  if (!item || !item.name || !item.sourceUrl || !GREEN_SOURCES.has(item.source) || !hasUsableThumbnail(item)) return null;
   if (!relevanceGate(item, query)) return null;
 
   const q = normalizeText(query);
@@ -125,7 +136,7 @@ export function scoreComponents(model, query, requestedFormat = null, profile = 
 
   const signals = technicalSignals(item);
   let technical = 0;
-  if (item.thumbnailUrl) technical += 5;
+  technical += 5;
   if (signals.textureFlags > 0) technical += Math.min(8, signals.textureFlags * 2);
   if (signals.hasDimensions) technical += 4;
   if (signals.hasPolycount) technical += 4;
@@ -156,7 +167,7 @@ export function diversifyAndRank(models, query, requestedFormat = null, limit = 
   const seenUrls = new Set();
   for (const raw of models) {
     const item = normalizeModel(raw);
-    if (!item || !item.sourceUrl || !item.thumbnailUrl) continue;
+    if (!item || !item.sourceUrl || !hasUsableThumbnail(item)) continue;
     const urlKey = item.sourceUrl.toLowerCase();
     if (seenUrls.has(urlKey)) continue;
     seenUrls.add(urlKey);
