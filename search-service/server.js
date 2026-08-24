@@ -9,6 +9,9 @@ const TIMEOUT_MS = Math.min(30_000, Math.max(5_000, Number(process.env.HTTP_TIME
 const CACHE_MS = Math.max(30_000, Number(process.env.SEARCH_CACHE_TTL_MS || 60_000));
 const CACHE_MAX = Math.max(32, Number(process.env.SEARCH_CACHE_MAX_ENTRIES || 256));
 const REQUEST_CONCURRENCY = Math.max(1, Number(process.env.PROVIDER_CONCURRENCY || 6));
+const RATE_LIMIT_WINDOW_MS = Math.max(1_000, Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000));
+const RATE_LIMIT_MAX_REQUESTS = Math.max(1, Number(process.env.RATE_LIMIT_MAX_REQUESTS || 30));
+const RATE_LIMIT_MAX_KEYS = Math.max(32, Number(process.env.RATE_LIMIT_MAX_KEYS || 4096));
 
 const ALIASES = { stp: 'step', igs: 'iges', blender: 'blend' };
 const FORMATS = new Set([
@@ -51,6 +54,7 @@ try {
 
 const cache = new Map();
 const inflight = new Map();
+const rateLimit = new Map();
 let polyhavenCache = null;
 let polyhavenCacheAt = 0;
 let nasaTree = null;
@@ -95,6 +99,39 @@ function cacheSet(key, data) {
   cache.set(key, { at: Date.now(), data });
   while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
 }
+
+function consumeRateLimit(key) {
+  const now = Date.now();
+  const entry = rateLimit.get(key);
+  if (!entry || now - entry.startedAt >= RATE_LIMIT_WINDOW_MS) {
+    rateLimit.delete(key);
+    rateLimit.set(key, { startedAt: now, count: 1 });
+  } else {
+    entry.count += 1;
+    rateLimit.delete(key);
+    rateLimit.set(key, entry);
+  }
+
+  for (const [entryKey, value] of rateLimit) {
+    if (now - value.startedAt >= RATE_LIMIT_WINDOW_MS) rateLimit.delete(entryKey);
+    else break;
+  }
+  while (rateLimit.size > RATE_LIMIT_MAX_KEYS) rateLimit.delete(rateLimit.keys().next().value);
+
+  const current = rateLimit.get(key);
+  if (current && current.count > RATE_LIMIT_MAX_REQUESTS) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((RATE_LIMIT_WINDOW_MS - (now - current.startedAt)) / 1000));
+    return { allowed: false, retryAfterSeconds };
+  }
+  return { allowed: true, retryAfterSeconds: 0 };
+}
+
+function clientKey(req) {
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
 async function fetchJson(url, options = {}) {
   const controller = new AbortController();
@@ -395,6 +432,12 @@ app.get('/providers', (_req, res) => res.json({
 }));
 
 app.get('/search', async (req, res) => {
+  const limitResult = consumeRateLimit(clientKey(req));
+  if (!limitResult.allowed) {
+    res.set('Retry-After', String(limitResult.retryAfterSeconds));
+    return res.status(429).json({ error: 'rate limit exceeded', retryAfterSeconds: limitResult.retryAfterSeconds });
+  }
+
   const parsed = normalizeQuery(String(req.query.q || ''));
   const format = normFormat(req.query.format || parsed.format) || null;
   if (!parsed.query) return res.status(400).json({ error: 'q is required' });
