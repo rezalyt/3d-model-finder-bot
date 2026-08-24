@@ -1,6 +1,5 @@
 import asyncio
 import os
-import signal
 import subprocess
 from contextlib import suppress
 
@@ -8,7 +7,7 @@ from aiohttp import web
 from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-# The search service stays private inside the same Render container.
+# The search service stays private inside the same container.
 os.environ.setdefault("SEARCH_SERVICE_URL", "http://127.0.0.1:8787")
 
 import bot  # noqa: E402
@@ -17,7 +16,12 @@ WEB_PORT = int(os.getenv("PORT", "10000"))
 SEARCH_PORT = int(os.getenv("SEARCH_PORT", "8787"))
 WEBHOOK_PATH = os.getenv("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook")
 WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
-EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+
+# Railway exposes RAILWAY_PUBLIC_DOMAIN when a public domain is assigned.
+# PUBLIC_URL can be used as an explicit override on any hosting platform.
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
+RAILWAY_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip().rstrip("/")
+EXTERNAL_URL = PUBLIC_URL or (f"https://{RAILWAY_DOMAIN}" if RAILWAY_DOMAIN else "")
 
 application = Application.builder().token(bot.TOKEN).build()
 application.add_handler(CommandHandler("start", bot.start))
@@ -87,7 +91,9 @@ async def on_startup(_app: web.Application):
     await asyncio.sleep(1)
 
     if not EXTERNAL_URL:
-        raise RuntimeError("RENDER_EXTERNAL_URL is not available; webhook cannot be configured")
+        raise RuntimeError(
+            "No public URL configured. Set PUBLIC_URL or assign a Railway public domain."
+        )
 
     await application.initialize()
     await application.start()
