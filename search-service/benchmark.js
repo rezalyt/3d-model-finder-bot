@@ -5,18 +5,27 @@ import { scoreModel, normalizeModel } from './search-quality.js';
 const POLYHAVEN_API_URL = process.env.POLYHAVEN_API_URL || 'https://api.polyhaven.com/assets';
 const POLYHAVEN_FILES_URL = process.env.POLYHAVEN_FILES_URL || 'https://api.polyhaven.com/files';
 const AMBIENTCG_API_URL = process.env.AMBIENTCG_API_URL || 'https://ambientcg.com/api/v2/full_json';
-const USER_AGENT = process.env.POLYHAVEN_BENCHMARK_USER_AGENT || '3DModelFinder-Benchmark/1.1';
+const USER_AGENT = process.env.POLYHAVEN_BENCHMARK_USER_AGENT || '3DModelFinder-Benchmark/1.2';
 const TOP_K = 5;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 200;
 const POLYHAVEN_FILE_CONCURRENCY = 8;
+const KNOWN_FORMATS = new Set([
+  'blend', 'fbx', 'gltf', 'glb', 'obj', 'usd', 'usda', 'usdc', 'usdz',
+  'abc', 'dae', 'stl', '3ds', 'max', 'ma', 'mb', 'c4d', 'ply', 'abc',
+]);
 
 function normalize(value) {
   return String(value || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function normalizeFormat(value) {
-  return String(value || '').toLowerCase().replace(/^\./, '');
+  return String(value || '').toLowerCase().replace(/^\./, '').trim();
+}
+
+function addFormat(candidate, formats) {
+  const normalized = normalizeFormat(candidate);
+  if (KNOWN_FORMATS.has(normalized)) formats.add(normalized);
 }
 
 function assetToPolyHavenModel(asset, formats = []) {
@@ -44,25 +53,35 @@ function assetToPolyHavenModel(asset, formats = []) {
 
 function extractPolyHavenFormats(filesPayload) {
   const formats = new Set();
-  for (const file of Object.values(filesPayload || {})) {
-    const formatsByType = file?.formats || file?.format || {};
-    if (typeof formatsByType === 'string') formats.add(normalizeFormat(formatsByType));
-    for (const key of Object.keys(formatsByType || {})) formats.add(normalizeFormat(key));
-    if (file?.name) {
-      const match = String(file.name).match(/\.([a-z0-9]+)$/i);
-      if (match) formats.add(normalizeFormat(match[1]));
+  function visit(value) {
+    if (value == null) return;
+    if (typeof value === 'string') {
+      const matches = value.match(/(?:^|[._\/])([a-z0-9]{2,5})(?:$|[._/?#])/gi) || [];
+      for (const token of matches) addFormat(token.replace(/^[._/]+/, ''), formats);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (typeof value === 'object') {
+      for (const [key, child] of Object.entries(value)) {
+        addFormat(key, formats);
+        visit(child);
+      }
     }
   }
-  return [...formats].filter(Boolean);
+  visit(filesPayload);
+  return [...formats].sort();
 }
 
 function extractAmbientFormats(asset) {
   const formats = new Set();
   const folders = asset?.downloadFolders?.default?.downloadFiletypeCategories || {};
-  for (const key of Object.keys(folders)) formats.add(normalizeFormat(key));
+  for (const key of Object.keys(folders)) addFormat(key, formats);
   const fileFormats = asset?.fileFormats || asset?.formats || asset?.downloadFormats || [];
-  for (const format of Array.isArray(fileFormats) ? fileFormats : []) formats.add(normalizeFormat(format));
-  return [...formats].filter(Boolean);
+  for (const format of Array.isArray(fileFormats) ? fileFormats : []) addFormat(format, formats);
+  return [...formats].sort();
 }
 
 function classifyAmbientType(asset) {
