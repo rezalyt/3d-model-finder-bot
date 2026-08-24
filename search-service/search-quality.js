@@ -64,10 +64,8 @@ function log10(value) {
 }
 
 function taskTerms(profile = {}) {
-  const category = profile.category || '';
-  const task = profile.task || '';
-  const software = profile.software || '';
-  return [task, category, software].filter(Boolean).map(normalizeText);
+  return [profile.task || '', profile.category || '', profile.software || '']
+    .filter(Boolean).map(normalizeText);
 }
 
 function categoryTerms(category) {
@@ -81,30 +79,26 @@ function hasAny(haystack, terms) {
 function technicalSignals(item) {
   const metadata = item.metadata || {};
   const textureFlags = [metadata.pbr, metadata.hasPbr, metadata.textures, metadata.hasTextures, metadata.materials].filter(Boolean).length;
-  const hasDimensions = Array.isArray(metadata.dimensions) && metadata.dimensions.length === 3;
+  const hasDimensions = Array.isArray(metadata.dimensions)
+    ? metadata.dimensions.length === 3
+    : Boolean(metadata.dimensions && typeof metadata.dimensions === 'object');
   const hasPolycount = Number.isFinite(Number(metadata.polycount ?? metadata.triangles ?? metadata.polygons));
   const hasLods = Boolean(metadata.lods || metadata.lodCount || metadata.hasLod);
-  return {
-    textureFlags,
-    hasDimensions,
-    hasPolycount,
-    hasLods,
-  };
+  return { textureFlags, hasDimensions, hasPolycount, hasLods };
 }
 
-export function scoreModel(model, query, requestedFormat = null, profile = {}) {
+export function scoreComponents(model, query, requestedFormat = null, profile = {}) {
   const item = normalizeModel(model);
-  if (!item || !item.name || !item.sourceUrl) return -Infinity;
-
+  if (!item || !item.name || !item.sourceUrl) return null;
   const q = normalizeText(query);
   const title = normalizeText(item.name);
   const body = normalizeText([item.name, item.description, ...item.tags, ...item.categories].join(' '));
   const qTerms = q.split(' ').filter(term => term && !COMMON_NOISE.has(term));
+
   let relevance = 0;
   if (title === q) relevance += 50;
   else if (title.startsWith(q)) relevance += 36;
   else if (title.includes(q)) relevance += 26;
-
   let matched = 0;
   for (const term of qTerms) {
     if (title.includes(term)) { relevance += 16; matched += 1; }
@@ -114,13 +108,11 @@ export function scoreModel(model, query, requestedFormat = null, profile = {}) {
 
   let taskFit = 0;
   if ((profile.task || 'landscape') === 'landscape') taskFit += 10;
-  const taskText = body;
-  const cTerms = categoryTerms(profile.category);
-  if (cTerms.length && hasAny(taskText, cTerms)) taskFit += 24;
+  if (profile.category && hasAny(body, categoryTerms(profile.category))) taskFit += 24;
   if (profile.software) {
     const compatibleFormats = SOFTWARE_FORMATS[profile.software];
     if (compatibleFormats && item.formats.some(format => compatibleFormats.has(format))) taskFit += 12;
-    if (taskText.includes(normalizeText(profile.software))) taskFit += 5;
+    if (body.includes(normalizeText(profile.software))) taskFit += 5;
   }
   for (const term of taskTerms(profile)) {
     if (term && body.includes(term)) taskFit += 3;
@@ -128,21 +120,21 @@ export function scoreModel(model, query, requestedFormat = null, profile = {}) {
 
   let formatFit = 0;
   if (requestedFormat) {
-    if (!item.formats.includes(requestedFormat)) return -Infinity;
+    if (!item.formats.includes(requestedFormat)) return null;
     formatFit += 25;
   } else if (profile.software && SOFTWARE_FORMATS[profile.software]) {
     if (item.formats.some(format => SOFTWARE_FORMATS[profile.software].has(format))) formatFit += 10;
   }
 
-  const technical = technicalSignals(item);
-  let technicalScore = 0;
-  if (item.thumbnailUrl) technicalScore += 5;
-  if (technical.textureFlags > 0) technicalScore += Math.min(8, technical.textureFlags * 2);
-  if (technical.hasDimensions) technicalScore += 4;
-  if (technical.hasPolycount) technicalScore += 4;
-  if (technical.hasLods) technicalScore += 4;
-  if (item.formats.length >= 2) technicalScore += 3;
-  if (item.description.length >= 80) technicalScore += 2;
+  const technicalSignalsData = technicalSignals(item);
+  let technical = 0;
+  if (item.thumbnailUrl) technical += 5;
+  if (technicalSignalsData.textureFlags > 0) technical += Math.min(8, technicalSignalsData.textureFlags * 2);
+  if (technicalSignalsData.hasDimensions) technical += 4;
+  if (technicalSignalsData.hasPolycount) technical += 4;
+  if (technicalSignalsData.hasLods) technical += 4;
+  if (item.formats.length >= 2) technical += 3;
+  if (item.description.length >= 80) technical += 2;
 
   let popularity = Math.min(log10(item.downloads) * 2.2, 8)
     + Math.min(log10(item.likes) * 1.5, 5)
@@ -152,7 +144,13 @@ export function scoreModel(model, query, requestedFormat = null, profile = {}) {
   else if (item.rating > 0 && item.rating < 3) popularity -= 3;
 
   const source = GREEN_SOURCES.has(item.source) ? 4 : 0;
-  return relevance + taskFit + formatFit + technicalScore + popularity + source;
+  return { relevance, taskFit, formatFit, technical, popularity, source };
+}
+
+export function scoreModel(model, query, requestedFormat = null, profile = {}) {
+  const components = scoreComponents(model, query, requestedFormat, profile);
+  if (!components) return -Infinity;
+  return Object.values(components).reduce((sum, value) => sum + value, 0);
 }
 
 function duplicateKey(model) {
@@ -168,11 +166,12 @@ export function diversifyAndRank(models, query, requestedFormat = null, limit = 
     const urlKey = item.sourceUrl.toLowerCase();
     if (seenUrls.has(urlKey)) continue;
     seenUrls.add(urlKey);
-    const score = scoreModel(item, query, requestedFormat, profile);
-    if (!Number.isFinite(score)) continue;
+    const components = scoreComponents(item, query, requestedFormat, profile);
+    if (!components) continue;
     candidates.push({
       ...item,
-      qualityScore: Math.round(score * 10) / 10,
+      qualityScore: Math.round(Object.values(components).reduce((sum, value) => sum + value, 0) * 10) / 10,
+      scoreComponents: components,
       licenseStatus: item.license || 'unknown',
     });
   }
