@@ -102,13 +102,31 @@ async def supervise_search_service():
                 print("Search service restart did not become ready", flush=True)
 
 
+async def get_webhook_info_safe():
+    try:
+        info = await application.bot.get_webhook_info()
+        return {
+            "url_set": bool(info.url),
+            "url_host": (info.url.split("/", 3)[2] if info.url.count("/") >= 2 else ""),
+            "pending_update_count": info.pending_update_count,
+            "last_error_date": info.last_error_date.isoformat() if info.last_error_date else None,
+            "last_error_message": info.last_error_message,
+            "max_connections": info.max_connections,
+            "ip_address": info.ip_address,
+        }
+    except Exception as exc:
+        return {"error": type(exc).__name__}
+
+
 async def health(_request: web.Request) -> web.Response:
     search_ok = search_process is not None and search_process.poll() is None
+    webhook_info = await get_webhook_info_safe() if telegram_ready.is_set() else {"initializing": True}
     return web.json_response({
         "ok": True,
         "service": "3d-model-finder-bot",
         "telegram_ready": telegram_ready.is_set(),
         "search_service": search_ok,
+        "telegram_webhook": webhook_info,
     })
 
 
@@ -130,6 +148,7 @@ async def webhook(request: web.Request) -> web.Response:
     if REQUIRE_WEBHOOK_SECRET:
         supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if not hmac.compare_digest(supplied, WEBHOOK_SECRET):
+            print("Telegram webhook rejected: invalid secret", flush=True)
             raise web.HTTPUnauthorized(text="invalid webhook secret")
 
     if not telegram_ready.is_set():
@@ -139,6 +158,7 @@ async def webhook(request: web.Request) -> web.Response:
         payload = await request.json(loads=json.loads)
         update_id = int(payload.get("update_id", -1))
         if update_id >= 0 and not _remember_update(update_id):
+            print(f"Telegram duplicate update ignored: {update_id}", flush=True)
             return web.json_response({"ok": True, "duplicate": True})
         update = Update.de_json(payload, application.bot)
         if update is None:
@@ -167,7 +187,9 @@ async def configure_telegram():
             drop_pending_updates=False,
         )
         telegram_ready.set()
+        info = await get_webhook_info_safe()
         print(f"Telegram webhook configured: {webhook_url}", flush=True)
+        print(f"Telegram webhook state: {json.dumps(info, ensure_ascii=False, sort_keys=True)}", flush=True)
         print("Telegram bot is ready to receive updates", flush=True)
     except Exception as exc:
         print(f"Telegram initialization error: {type(exc).__name__}", flush=True)
