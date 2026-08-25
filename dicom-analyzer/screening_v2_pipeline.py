@@ -12,13 +12,6 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-PHASES = {"native", "arterial", "portal", "delayed"}
-
-
-def mean_hu(obs):
-    vals = [float(x.get("mean_hu")) for x in obs if x.get("mean_hu") is not None]
-    return sum(vals) / len(vals) if vals else None
-
 
 def phase_obs(candidate, phase):
     return [o for o in candidate.get("observations", []) if o.get("phase") == phase]
@@ -31,8 +24,6 @@ def triage(candidate):
     reasons = []
     score = float(candidate.get("screening_priority", 0))
 
-    # Known non-pathologic pattern: high delayed renal attenuation with lower
-    # portal/native values is compatible with excreted contrast/collecting system.
     if organ.startswith("kidney"):
         delayed = phase_obs(candidate, "delayed")
         portal = phase_obs(candidate, "portal")
@@ -47,7 +38,6 @@ def triage(candidate):
             reasons.append("High delayed-phase renal attenuation is nonspecific without a non-delayed comparison.")
             score -= 25
 
-    # Liver candidates in common enhancement ranges are often vascular/background enhancement.
     if organ == "liver":
         portal_vals = [float(o["mean_hu"]) for o in phase_obs(candidate, "portal") if o.get("mean_hu") is not None]
         arterial_vals = [float(o["mean_hu"]) for o in phase_obs(candidate, "arterial") if o.get("mean_hu") is not None]
@@ -62,7 +52,6 @@ def triage(candidate):
             reasons.append("Low attenuation on native phase without corroborating enhancement is nonspecific.")
             score -= 10
 
-    # Repetition across phases increases reproducibility, but is not proof of pathology.
     if len(phases) >= 3:
         score += 12
         reasons.append("Observed across at least three phases; reproducibility supports manual review.")
@@ -72,7 +61,6 @@ def triage(candidate):
         score -= 5
         reasons.append("Observed in only one phase; confidence is limited.")
 
-    # Very high raw priority can survive filtering, but cap to 100.
     score = max(0.0, min(100.0, score))
     if score >= 60:
         level = "HIGH_REVIEW"
@@ -143,13 +131,12 @@ def main():
             f"<tr><td>{c.get('candidate_id')}</td><td>{c.get('organ')}</td><td>{c.get('triage_level')}</td>"
             f"<td>{c.get('triage_score'):.1f}</td><td>{obs}</td><td>{reasons}</td></tr>"
         )
-    html = """<!doctype html><html><head><meta charset='utf-8'><title>CT screening v2</title>
-<style>body{font-family:Arial,sans-serif;margin:30px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:7px;text-align:left;vertical-align:top}th{background:#f0f0f0}</style></head>
+
+    html = f"""<!doctype html><html><head><meta charset='utf-8'><title>CT screening v2</title>
+<style>body{{font-family:Arial,sans-serif;margin:30px}}table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:7px;text-align:left;vertical-align:top}}th{{background:#f0f0f0}}</style></head>
 <body><h1>CT screening candidate triage v2</h1><p><b>Research/screening only.</b> Rule-based triage does not diagnose or exclude disease.</p>
-<p>Input candidates: %d. HIGH_REVIEW: %d. REVIEW: %d. LIKELY_PHYSIOLOGIC_OR_LOW_PRIORITY: %d.</p>
-<table><tr><th>ID</th><th>Organ</th><th>Level</th><th>Score</th><th>Observations</th><th>Reasoning</th></tr>%s</table></body></html>""" % (
-        len(candidates), counts["HIGH_REVIEW"], counts["REVIEW"], counts["LIKELY_PHYSIOLOGIC_OR_LOW_PRIORITY"], "".join(rows)
-    )
+<p>Input candidates: {len(candidates)}. HIGH_REVIEW: {counts['HIGH_REVIEW']}. REVIEW: {counts['REVIEW']}. LIKELY_PHYSIOLOGIC_OR_LOW_PRIORITY: {counts['LIKELY_PHYSIOLOGIC_OR_LOW_PRIORITY']}.</p>
+<table><tr><th>ID</th><th>Organ</th><th>Level</th><th>Score</th><th>Observations</th><th>Reasoning</th></tr>{''.join(rows)}</table></body></html>"""
     (args.out / "screening_v2.html").write_text(html, encoding="utf-8")
     print(f"Input candidates: {len(candidates)}")
     print(f"HIGH_REVIEW: {counts['HIGH_REVIEW']}")
