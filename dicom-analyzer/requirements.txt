@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pydicom
+numpy
+Pillow
+requests
