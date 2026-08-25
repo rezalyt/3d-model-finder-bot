@@ -8,7 +8,7 @@ from PIL import Image, ImageOps
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-app = FastAPI(title="DICOM Analyzer", version="0.2.0")
+app = FastAPI(title="DICOM Analyzer", version="0.2.1")
 ROOT = Path(os.getenv("WORK_ROOT", "/tmp/dicom-analyzer")); ROOT.mkdir(parents=True, exist_ok=True)
 SOURCE = os.getenv("DICOM_SOURCE_URL", "")
 JOBS = {}; LOCK = threading.Lock()
@@ -59,7 +59,9 @@ def process(job_id,url):
                 try:
                     with z.open(info) as fh: data=fh.read()
                     ds=read_ds(data,False)
-                    if not hasattr(ds,"PixelData"): continue
+                    # stop_before_pixels=True intentionally omits PixelData; identify image objects by geometry/UID instead.
+                    is_image = hasattr(ds,"SOPClassUID") and (hasattr(ds,"Rows") and hasattr(ds,"Columns"))
+                    if not is_image: continue
                     uid=str(getattr(ds,"SeriesInstanceUID","unknown"))
                     series.setdefault(uid,[]).append({"name":info.filename,"instance":int(getattr(ds,"InstanceNumber",0) or 0),"series_number":int(getattr(ds,"SeriesNumber",0) or 0),"modality":str(getattr(ds,"Modality","")),"body_part":str(getattr(ds,"BodyPartExamined","")),"description":str(getattr(ds,"SeriesDescription","")),"rows":int(getattr(ds,"Rows",0) or 0),"cols":int(getattr(ds,"Columns",0) or 0)})
                     del data,ds
