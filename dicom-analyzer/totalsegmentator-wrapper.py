@@ -4,19 +4,26 @@ import sys
 
 REAL = "/usr/local/bin/TotalSegmentator-real"
 
+
 def main():
-    args = sys.argv[1:]
-    # Keep the existing invocation intact, but force low-memory options for Railway CPU.
-    extra = ["--force_split", "--nr_thr_resamp", "1", "--nr_thr_saving", "1"]
-    if "--fast" not in args and "--fastest" not in args:
-        extra += ["--fast"]
-    # Avoid duplicate flags if the caller already supplies them.
-    for flag in ("--force_split", "--nr_thr_resamp", "--nr_thr_saving"):
-        while flag in args:
-            i = args.index(flag)
-            del args[i:i+2] if flag != "--force_split" else args[i:i+1]
-    cmd = [REAL, *args, *extra]
+    raw = sys.argv[1:]
+    clean = []
+    i = 0
+    while i < len(raw):
+        arg = raw[i]
+        if arg == "--force_split":
+            i += 1
+            continue
+        if arg in ("--nr_thr_resamp", "--nr_thr_saving"):
+            i += 2
+            continue
+        clean.append(arg)
+        i += 1
+    cmd = [REAL, *clean, "--force_split", "--nr_thr_resamp", "1", "--nr_thr_saving", "1"]
+    if "--fast" not in clean and "--fastest" not in clean:
+        cmd.append("--fast")
     os.execv(REAL, cmd)
+
 
 if __name__ == "__main__":
     main()
