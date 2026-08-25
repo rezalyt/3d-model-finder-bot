@@ -9,10 +9,15 @@ from pathlib import Path
 
 import pydicom
 
+# Coverage for unified abdominal screening. TotalSegmentator's total task
+# includes these anatomy classes, including stomach, gallbladder, small bowel,
+# duodenum and colon.
 ROIS = [
     "liver", "pancreas", "gallbladder", "spleen",
     "kidney_left", "kidney_right",
-    "adrenal_gland_left", "adrenal_gland_right", "aorta",
+    "adrenal_gland_left", "adrenal_gland_right",
+    "stomach", "duodenum", "small_bowel", "colon",
+    "aorta", "inferior_vena_cava", "portal_vein_and_splenic_vein",
 ]
 SKIP = ("topogram", "scout", "localizer", "monitor", "premonitor")
 
@@ -88,7 +93,10 @@ def existing_ok(series_out: Path):
         return False
     try:
         data = json.loads(run_file.read_text(encoding="utf-8"))
-        return data.get("status") == "completed" and data.get("returncode") == 0
+        if data.get("status") != "completed" or data.get("returncode") != 0:
+            return False
+        seg = series_out / "segmentation"
+        return all((seg / f"{roi}.nii.gz").exists() for roi in ROIS)
     except Exception:
         return False
 
@@ -144,14 +152,13 @@ def main():
             "status": "running",
             "returncode": None,
             "result_dir": str(series_out),
+            "required_rois": ROIS,
         }
         (series_out / "run.json").write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
 
         with tempfile.TemporaryDirectory(prefix="dicom_series_") as tmp:
             dicom_dir = Path(tmp) / "dicom"
-            nifti_dir = Path(tmp) / "nifti"
             copy_series(args.zip, items, dicom_dir)
-            # TotalSegmentator accepts a DICOM directory; it performs its own conversion.
             proc = run_series(dicom_dir, series_out / "segmentation", gpu)
             entry.update({
                 "returncode": proc.returncode,
