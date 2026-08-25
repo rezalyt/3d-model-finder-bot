@@ -1,0 +1,2 @@
+TotalSegmentator==2.18.0
+pydicom==3.0.2
