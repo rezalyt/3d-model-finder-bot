@@ -20,15 +20,19 @@ def main():
         if arg in ("--task", "-ta", "--model_size", "-ms"):
             i += 2
             continue
+        if arg == "--body_seg":
+            i += 1
+            continue
         clean.append(arg)
         i += 1
 
-    # Use the lightweight v3 model and the focused abdominal ROI subset.
+    # Low-memory abdominal inference on the 1 GB Railway container.
     cmd = [
         REAL,
         *clean,
         "--task", "total_v3",
         "--model_size", "small",
+        "--body_seg",
         "--force_split",
         "--nr_thr_resamp", "1",
         "--nr_thr_saving", "1",
