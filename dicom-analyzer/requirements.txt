@@ -4,3 +4,4 @@ pydicom
 numpy
 Pillow
 requests
+TotalSegmentator==2.18.0
