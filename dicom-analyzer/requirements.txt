@@ -1,7 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi
 uvicorn[standard]
 pydicom
 numpy
 Pillow
 requests
+torch==2.8.0+cpu
+torchvision==0.23.0+cpu
 TotalSegmentator==2.18.0
